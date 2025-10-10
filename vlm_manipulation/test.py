@@ -288,19 +288,13 @@ if __name__ == "__main__":
 
         sim = env.env.sim
         robot = env.env.robots[0]
-        for key, value in obs.items():
-            if key.startswith("robot"):
-                log.info(f"{key}: {value}")
-        log.info(f"robot: {robot.robot_model.root_body}")
         bid = sim.model.body_name2id(robot.robot_model.root_body)
-
         p_wb = sim.data.body_xpos[bid].copy()  # (3,) position [m] in world
-        R_wb = sim.data.body_xmat[bid].reshape(3, 3).copy()  # rotation matrix
         q_wb = sim.data.body_xquat[bid].copy()  # (w, x, y, z) quaternion
 
-        log.info(f"p_wb: {p_wb}, R_wb: {R_wb}, q_wb: {q_wb}")
+        log.info(f"p_wb: {p_wb}, q_wb: {q_wb}")
 
-        traj_optimizer = TrajOptimizer([1.15, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        traj_optimizer = TrajOptimizer(p_wb.tolist() + q_wb.tolist())
         mc = MotionController(env, obs, traj_optimizer)
 
         # point cloud from agentview
