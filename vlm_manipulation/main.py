@@ -217,34 +217,19 @@ class MotionController:
 
 
 
-@configclass
-class Args:
-    """Arguments for the static scene."""
-
-    robot: str = "franka"
-
-    ## Handlers
-    sim: Literal["isaaclab", "isaacgym", "genesis", "pybullet", "sapien2", "sapien3", "mujoco"] = "mujoco"
-
-    ## Others
-    num_envs: int = 1
-    headless: bool = False
-    task_name: str = "LiberoPickChocolatePudding"
-    prompt: str = "pick up the bbq sauce and place it in the basket"
-
-    def __post_init__(self):
-        """Post-initialization configuration."""
-        log.info(f"Args: {self}")
-
-
 if __name__ == "__main__":
-    args = tyro.cli(Args)
+    prompt = "pick up the bbq sauce and place it in the basket"
 
-    # initialize scenario
-    task_name = args.task_name
-    prompt = args.prompt
+    benchmark_dict = benchmark.get_benchmark_dict()
+    print(benchmark_dict)
 
-    task = get_task(task_name)
+    # initialize a benchmark
+    benchmark_instance = benchmark_dict["libero_10"]()
+    num_tasks = benchmark_instance.get_num_tasks()
+
+    # 
+    task_id = 0
+    task = get_task(task_id)
 
     # default
     scenario = ScenarioCfg(

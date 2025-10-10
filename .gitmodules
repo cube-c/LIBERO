@@ -1,3 +1,7 @@
 [submodule "third_party/curobo"]
 	path = third_party/curobo
-	url = git@github.com:RoboVerseOrg/curobo.git
+	url = https://github.com/RoboVerseOrg/curobo.git
+
+[submodule "third_party/gsnet"]
+	path = third_party/gsnet
+	url = https://github.com/graspnet/graspnet-baseline.git
