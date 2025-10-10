@@ -1,6 +1,7 @@
 import os
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
+import open3d as o3d
 import imageio
 from PIL import Image
 
@@ -9,36 +10,130 @@ import torch
 import rootutils
 from loguru import logger as log
 from rich.logging import RichHandler
-from vlm_manipulation.camera_utils import get_cam_params, get_pcd_from_rgbd
+from robosuite.utils.camera_utils import (
+    get_camera_intrinsic_matrix,
+    get_camera_extrinsic_matrix,
+)
 
 rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
+H, W = 256, 256
 
-def get_point_cloud_from_camera(img, depth, camera, output_suffix=""):
+
+def depth_buffer_to_depth_image(depth, zfar, znear):
+    return znear / (1.0 - depth * (1.0 - znear / zfar))
+
+
+def get_pcd_from_rgbd(depth, rgb_img, cam_intr_mat, cam_extr_mat):
+    """Get the point cloud from the RGBD image."""
+    if type(cam_intr_mat) is not np.ndarray:
+        cam_intr_mat = np.array(cam_intr_mat)
+    if type(cam_extr_mat) is not np.ndarray:
+        cam_extr_mat = np.array(cam_extr_mat)
+
+    depth_o3d = o3d.geometry.Image(np.ascontiguousarray(depth).astype(np.float32))
+    rgb_o3d = o3d.geometry.Image(np.ascontiguousarray(rgb_img).astype(np.uint8))
+    rgbd_o3d = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        rgb_o3d, depth_o3d, depth_scale=1.0, convert_rgb_to_intensity=False
+    )
+
+    cam_intr = o3d.camera.PinholeCameraIntrinsic(
+        width=depth.shape[1],
+        height=depth.shape[0],
+        fx=cam_intr_mat[0, 0],
+        fy=cam_intr_mat[1, 1],
+        cx=cam_intr_mat[0, 2],
+        cy=cam_intr_mat[1, 2],
+    )
+    cam_extr = np.array(cam_extr_mat)
+
+    pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
+        rgbd_o3d,
+        cam_intr,
+        cam_extr,
+    )
+
+    return pcd
+
+
+def get_point_cloud_from_camera(img, depth, camera_name):
     """Get the point cloud from the observation."""
     log.info(f"img shape: {img.shape}, depth shape: {depth.shape}")
-    max_depth = np.max(depth[0].cpu().numpy())
-    scene_depth = depth / max_depth * 255.0  # normalize depth to [0, 1]
-    scene_img = Image.fromarray(img[0].cpu().numpy())
-    scene_depth = Image.fromarray(
-        (scene_depth[0].squeeze(-1).cpu().numpy() / max_depth * 255.0).astype("uint8")
-    )
-    scene_img.save(f"vlm_manipulation/output/img{output_suffix}.png")
-    scene_depth.save(f"vlm_manipulation/output/depth{output_suffix}.png")
 
-    extr, intr = get_cam_params(
-        cam_pos=torch.tensor([camera.pos]),
-        cam_look_at=torch.tensor([camera.look_at]),
-        width=camera.width,
-        height=camera.height,
-        focal_length=camera.focal_length,
-        horizontal_aperture=camera.horizontal_aperture,
-    )
-    pcd = get_pcd_from_rgbd(depth.cpu()[0], img.cpu()[0], intr[0], extr[0])
+    max_depth = np.max(depth)
+    min_depth = np.min(depth)
+    log.info(f"max_depth: {max_depth}, min_depth: {min_depth}")
+    scene_depth = (
+        (depth - min_depth) / (max_depth - min_depth) * 255.0
+    )  # normalize depth to [0, 1]
+    scene_img = Image.fromarray(img)
+    scene_depth = Image.fromarray(scene_depth[:, :, 0].astype(np.uint8))
+    scene_img.save(f"outputs/img_{camera_name}.png")
+    scene_depth.save(f"outputs/depth_{camera_name}.png")
+
+    extr = get_camera_extrinsic_matrix(env.sim, camera_name)
+    log.info(f"extr: {extr}")
+    extr = np.linalg.inv(extr)
+    intr = get_camera_intrinsic_matrix(env.sim, camera_name, H, W)
+    log.info(f"extr: {extr}, intr: {intr} for {camera_name}")
+
+    pcd = get_pcd_from_rgbd(depth, img, intr, extr)
     pcd.estimate_normals()
     log.info(f"pcd shape: {np.array(pcd.points).shape}")
     return pcd, intr, extr
+
+
+def get_point_cloud_from_obs(obs, zfar, znear, camera_names=["agentview", "sideview"]):
+    depth1 = depth_buffer_to_depth_image(obs[camera_names[0] + "_depth"], zfar, znear)[
+        ::-1
+    ]
+    depth2 = depth_buffer_to_depth_image(obs[camera_names[1] + "_depth"], zfar, znear)[
+        ::-1
+    ]
+    img1 = obs[camera_names[0] + "_image"][::-1]
+    img2 = obs[camera_names[1] + "_image"][::-1]
+    pcd1, intr, extr = get_point_cloud_from_camera(
+        img1,
+        depth1,
+        camera_names[0],
+    )
+    pcd2, _, _ = get_point_cloud_from_camera(
+        img2,
+        depth2,
+        camera_names[1],
+    )
+
+    reg = o3d.pipelines.registration.registration_icp(
+        pcd2,
+        pcd1,
+        0.0025,
+        np.eye(4),
+        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+    )
+
+    # Convert to numpy arrays
+    pts1 = np.asarray(pcd1.points)  # shape (N, 3)
+    pts2 = np.asarray(pcd2.points)  # shape (M, 3)
+
+    # Apply transformation to pcd2
+    T = reg.transformation  # shape (4, 4)
+    pts2_h = np.hstack((pts2, np.ones((pts2.shape[0], 1))))  # shape (M, 4)
+    pts2_transformed = (T @ pts2_h.T).T[:, :3]
+
+    pts1 = np.asarray(pcd1.points)
+    all_points = np.vstack((pts1, pts2_transformed))
+
+    colors1 = np.asarray(pcd1.colors)
+    colors2 = np.asarray(pcd2.colors)
+    all_colors = np.vstack((colors1, colors2))
+
+    pcd_merged = o3d.geometry.PointCloud()
+    pcd_merged.points = o3d.utility.Vector3dVector(all_points)
+    pcd_merged.colors = o3d.utility.Vector3dVector(all_colors)
+    o3d.io.write_point_cloud("outputs/merged.ply", pcd_merged)
+
+    return pcd_merged, depth1, intr, extr
 
 
 def get_joint_state_from_obs(obs):
@@ -81,8 +176,8 @@ if __name__ == "__main__":
         ),
         "camera_names": ["agentview", "sideview"],
         "camera_depths": True,
-        "camera_heights": 1024,
-        "camera_widths": 1024,
+        "camera_heights": H,
+        "camera_widths": W,
         "controller": "JOINT_POSITION",
     }
 
@@ -112,8 +207,11 @@ if __name__ == "__main__":
         for _ in range(10):
             obs, _, _, _ = env.step([0.0] * 8)
 
-        for key in obs:
-            print(f"{key}: {obs[key]}")
+        # point cloud from agentview
+        extent = float(env.env.sim.model.stat.extent)
+        zfar = env.env.sim.model.vis.map.zfar * extent
+        znear = env.env.sim.model.vis.map.znear * extent
+        pcd, depth, intr, extr = get_point_cloud_from_obs(obs, zfar, znear)
 
         # action
         for _ in range(200):
