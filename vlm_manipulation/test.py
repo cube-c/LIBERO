@@ -10,10 +10,13 @@ import torch
 import rootutils
 from loguru import logger as log
 from rich.logging import RichHandler
+from collections import OrderedDict
 from robosuite.utils.camera_utils import (
     get_camera_intrinsic_matrix,
     get_camera_extrinsic_matrix,
 )
+from vlm_manipulation.curobo_utils import TrajOptimizer
+from curobo.types.robot import JointState
 
 rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
@@ -59,11 +62,8 @@ def get_pcd_from_rgbd(depth, rgb_img, cam_intr_mat, cam_extr_mat):
 
 def get_point_cloud_from_camera(img, depth, camera_name):
     """Get the point cloud from the observation."""
-    log.info(f"img shape: {img.shape}, depth shape: {depth.shape}")
-
     max_depth = np.max(depth)
     min_depth = np.min(depth)
-    log.info(f"max_depth: {max_depth}, min_depth: {min_depth}")
     scene_depth = (
         (depth - min_depth) / (max_depth - min_depth) * 255.0
     )  # normalize depth to [0, 1]
@@ -73,14 +73,11 @@ def get_point_cloud_from_camera(img, depth, camera_name):
     scene_depth.save(f"outputs/depth_{camera_name}.png")
 
     extr = get_camera_extrinsic_matrix(env.sim, camera_name)
-    log.info(f"extr: {extr}")
     extr = np.linalg.inv(extr)
     intr = get_camera_intrinsic_matrix(env.sim, camera_name, H, W)
-    log.info(f"extr: {extr}, intr: {intr} for {camera_name}")
 
     pcd = get_pcd_from_rgbd(depth, img, intr, extr)
     pcd.estimate_normals()
-    log.info(f"pcd shape: {np.array(pcd.points).shape}")
     return pcd, intr, extr
 
 
@@ -151,6 +148,92 @@ def step_to_target_pos(env, obs, target_pos):
     return env.step(diff.tolist())
 
 
+class MotionController:
+    """
+    MotionController is used to control the robot from prompt.
+    It gets the prompt and return the trajectory.
+    It is dependent on the RoboVerse simulator setup.
+    """
+
+    def __init__(
+        self,
+        env: OffScreenRenderEnv,
+        obs: OrderedDict,
+        traj_optimizer: TrajOptimizer,
+    ):
+        self.env = env
+        self.obs = obs
+        self.traj_optimizer = traj_optimizer
+
+    def dummy_action(self, step: int):
+        return torch.zeros((step, 8))
+
+    def wrap_action(self, actions):
+        if self.sim == "isaaclab":
+            return [
+                {
+                    "dof_pos_target": dict(
+                        zip(self.robot.actuators.keys(), action.tolist())
+                    )
+                }
+                for action in actions
+            ]
+        elif self.sim == "mujoco":
+            return [
+                {
+                    self.robot.name: {
+                        "dof_pos_target": dict(
+                            zip(self.robot.actuators.keys(), action.tolist())
+                        )
+                    }
+                }
+                for action in actions
+            ]
+        else:
+            raise ValueError(f"Invalid simulator: {self.sim}")
+
+    def get_joint_state(self):
+        """Get the current joint position."""
+        joint_reindex = self.env.handler.get_joint_reindex(self.robot.name)
+        joint_pos = (
+            self.env.handler.get_states().robots[self.robot.name].joint_pos.cuda()
+        )
+        js = JointState.from_position(
+            position=joint_pos[:, torch.argsort(torch.tensor(joint_reindex))],
+            joint_names=list(self.robot.actuators.keys()),
+        )
+        log.info(f"Current robot joint state: {js}")
+        return js
+
+    def act(self, actions, save_obs: bool = True):
+        """Act the robot and save the observation"""
+        actions = self.wrap_action(actions)
+        for action in actions:
+            # log.info(f"Action: {action}")
+            obs, _, _, _, _ = self.env.step([action])
+            if save_obs:
+                obs = self.env.handler.get_states()
+                self.obs_saver.add(obs)
+        if save_obs:
+            self.obs_saver.save()
+        return obs
+
+    def simulate_from_prompt(self, prompt: str):
+        """Simulate the robot from prompt."""
+        actions = self.dummy_action(120)
+        obs = self.act(actions, save_obs=False)
+
+        img = Image.fromarray(obs.cameras["camera0"].rgb[0].cpu().numpy())
+        pcd, depth, cam_intr_mat, cam_extr_mat = get_point_cloud_from_obs(obs)
+
+        js = self.get_joint_state()
+        actions = self.traj_optimizer.plan_trajectory(
+            js, img, depth, pcd, prompt, cam_intr_mat, cam_extr_mat
+        )
+        obs = self.act(actions, save_obs=True)
+        return obs
+
+
 if __name__ == "__main__":
     benchmark_root_path = get_libero_path("benchmark_root")
     init_states_default_path = get_libero_path("init_states")
@@ -201,16 +284,29 @@ if __name__ == "__main__":
 
     for eval_index in range(len(init_states)):
         images = []
-        env.set_init_state(init_states[eval_index])
+        obs = env.set_init_state(init_states[eval_index])
 
-        # wait until the objects are stable
-        for _ in range(10):
-            obs, _, _, _ = env.step([0.0] * 8)
+        sim = env.env.sim
+        robot = env.env.robots[0]
+        for key, value in obs.items():
+            if key.startswith("robot"):
+                log.info(f"{key}: {value}")
+        log.info(f"robot: {robot.robot_model.root_body}")
+        bid = sim.model.body_name2id(robot.robot_model.root_body)
+
+        p_wb = sim.data.body_xpos[bid].copy()  # (3,) position [m] in world
+        R_wb = sim.data.body_xmat[bid].reshape(3, 3).copy()  # rotation matrix
+        q_wb = sim.data.body_xquat[bid].copy()  # (w, x, y, z) quaternion
+
+        log.info(f"p_wb: {p_wb}, R_wb: {R_wb}, q_wb: {q_wb}")
+
+        traj_optimizer = TrajOptimizer([1.15, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        mc = MotionController(env, obs, traj_optimizer)
 
         # point cloud from agentview
-        extent = float(env.env.sim.model.stat.extent)
-        zfar = env.env.sim.model.vis.map.zfar * extent
-        znear = env.env.sim.model.vis.map.znear * extent
+        extent = float(sim.model.stat.extent)
+        zfar = sim.model.vis.map.zfar * extent
+        znear = sim.model.vis.map.znear * extent
         pcd, depth, intr, extr = get_point_cloud_from_obs(obs, zfar, znear)
 
         # action
