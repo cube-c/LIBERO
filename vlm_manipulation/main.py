@@ -147,7 +147,6 @@ def step_to_target_pos(env, obs, target_pos):
     return env.step(diff.tolist())
 
 
-
 class MotionController:
     """
     MotionController is used to control the robot from prompt.
@@ -176,9 +175,9 @@ class MotionController:
         js = JointState.from_position(
             position=joint_pos.unsqueeze(0).to(torch.float32).to("cuda:0"),
             joint_names=[
-                "panda_joint1", 
-                "panda_joint2", 
-                "panda_joint3", 
+                "panda_joint1",
+                "panda_joint2",
+                "panda_joint3",
                 "panda_joint4",
                 "panda_joint5",
                 "panda_joint6",
@@ -202,7 +201,7 @@ class MotionController:
 
         return obs
 
-    def get_point_cloud_from_obs(self):
+    def get_point_cloud(self):
         # point cloud from agentview
         sim = self.env.env.sim
         extent = float(sim.model.stat.extent)
@@ -218,7 +217,7 @@ class MotionController:
         robot = self.env.env.robots[0]
         sim = self.env.env.sim
         bid = sim.model.body_name2id(robot.robot_model.root_body)
-        robot_position = sim.data.body_xpos[bid].copy() 
+        robot_position = sim.data.body_xpos[bid].copy()
         robot_rotation_matrix = sim.data.body_xmat[bid].reshape(3, 3).copy()
 
         points = points - robot_position
@@ -232,14 +231,14 @@ class MotionController:
         obs = self.act(actions, save_obs=True)
 
         img = Image.fromarray(obs["agentview_image"][::-1])
-        pcd, depth, cam_intr_mat, cam_extr_mat = self.get_point_cloud_from_obs()
+        pcd, depth, cam_intr_mat, cam_extr_mat = self.get_point_cloud()
         pcd, robot_position, robot_rotation_matrix = self.pcd_to_robot_center(pcd)
         o3d.io.write_point_cloud("outputs/merged.ply", pcd)
 
         # transform camera extrinsic matrix with respect to robot center and rotation matrix
         T_robot = np.eye(4, dtype=np.float64)
         T_robot[:3, :3] = robot_rotation_matrix
-        T_robot[:3,  3] = robot_position
+        T_robot[:3, 3] = robot_position
         cam_extr_mat = cam_extr_mat @ T_robot
 
         js = self.get_joint_state()
@@ -307,7 +306,7 @@ if __name__ == "__main__":
         sim = env.env.sim
         robot = env.env.robots[0]
 
-        traj_optimizer = TrajOptimizer([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+        traj_optimizer = TrajOptimizer()
         mc = MotionController(env, obs, traj_optimizer)
 
         mc.simulate_from_prompt("pick up the bbq sauce and place it in the basket")

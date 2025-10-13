@@ -35,8 +35,13 @@ from curobo.types.robot import JointState
 from curobo.types.robot import RobotConfig
 from curobo.types.state import JointState
 from curobo.util_file import get_robot_path, join_path, load_yaml
-from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenPlanConfig, MotionGenConfig
+from curobo.wrap.reacher.motion_gen import (
+    MotionGen,
+    MotionGenPlanConfig,
+    MotionGenConfig,
+)
 from vlm_manipulation.gsnet_utils import GSNet
+
 
 class VLMPointExtractor:
     def __init__(self, ckpt_path="Qwen/Qwen2.5-VL-7B-Instruct"):
@@ -58,7 +63,9 @@ class VLMPointExtractor:
             },
         ]
 
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
         inputs = self.processor(
             text=text,
             images=img,
@@ -66,9 +73,14 @@ class VLMPointExtractor:
         )
         inputs = inputs.to(self.model.device)
         generated_ids = self.model.generate(**inputs, max_new_tokens=512)
-        generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :]
+            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
         output_text = self.processor.batch_decode(
-            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
         )[0]
         return output_text
 
@@ -97,7 +109,11 @@ class VLMPointExtractor:
                 return False
 
             def ok(v):
-                return isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(n, (int, float)) for n in v)
+                return (
+                    isinstance(v, (list, tuple))
+                    and len(v) == 2
+                    and all(isinstance(n, (int, float)) for n in v)
+                )
 
             return ok(obj["pick_up"]) and ok(obj["put_down"])
 
@@ -108,17 +124,21 @@ class VLMPointExtractor:
         def flatten(obj: Any):
             out = []
             if _is_pick_put_obj(obj):
-                out.append({
-                    "pick_up": _normalize_pair(obj["pick_up"]),
-                    "put_down": _normalize_pair(obj["put_down"]),
-                })
+                out.append(
+                    {
+                        "pick_up": _normalize_pair(obj["pick_up"]),
+                        "put_down": _normalize_pair(obj["put_down"]),
+                    }
+                )
             elif isinstance(obj, list):
                 for it in obj:
                     if _is_pick_put_obj(it):
-                        out.append({
-                            "pick_up": _normalize_pair(it["pick_up"]),
-                            "put_down": _normalize_pair(it["put_down"]),
-                        })
+                        out.append(
+                            {
+                                "pick_up": _normalize_pair(it["pick_up"]),
+                                "put_down": _normalize_pair(it["put_down"]),
+                            }
+                        )
             return out
 
         def code_fences(s: str) -> List[str]:
@@ -211,7 +231,9 @@ class VLMPointExtractor:
                 point /= 100.0
                 point = point * np.array([image_w, image_h])
                 all_points.append(point)
-        for match in re.finditer(r'x\d*="\s*([0-9]+(?:\.[0-9]+)?)"\s+y\d*="\s*([0-9]+(?:\.[0-9]+)?)"', text):
+        for match in re.finditer(
+            r'x\d*="\s*([0-9]+(?:\.[0-9]+)?)"\s+y\d*="\s*([0-9]+(?:\.[0-9]+)?)"', text
+        ):
             try:
                 point = [float(match.group(i)) for i in range(1, 3)]
             except ValueError:
@@ -263,7 +285,10 @@ class GraspPoseFinder:
         point_mask = np.ones(points.shape[0], dtype=bool)
         point_mask = np.logical_and(
             points[:, 2] <= 0.2,
-            np.logical_and(points[:, 0] <= 1.0, np.logical_and(points[:, 1] >= -1.0, points[:, 1] <= 1.0)),
+            np.logical_and(
+                points[:, 0] <= 1.0,
+                np.logical_and(points[:, 1] >= -1.0, points[:, 1] <= 1.0),
+            ),
         )
 
         # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
@@ -279,7 +304,9 @@ class GraspPoseFinder:
 
         grasps = self.gsnet.inference(np.array(pcd.points) @ self.transform_matrix)
         grasps.translations = grasps.translations @ self.transform_matrix.T
-        grasps.rotation_matrices = self.transform_matrix @ grasps.rotation_matrices @ self.transform_matrix.T
+        grasps.rotation_matrices = (
+            self.transform_matrix @ grasps.rotation_matrices @ self.transform_matrix.T
+        )
 
         # Filter out grasps that has width larger than 0.08 (franka finger width)
         grasps = grasps[grasps.widths <= 0.08]
@@ -291,15 +318,32 @@ class GraspPoseFinder:
 
         return grasps
 
-    def visualize(self, pcd: o3d.geometry.PointCloud, grasps, image_only=False, save_dir="", filename=""):
+    def visualize(
+        self,
+        pcd: o3d.geometry.PointCloud,
+        grasps,
+        image_only=False,
+        save_dir="",
+        filename="",
+    ):
         pcd_clone = copy.deepcopy(pcd)
         grasps_clone = copy.deepcopy(grasps)
-        pcd_clone.points = o3d.utility.Vector3dVector(np.asarray(pcd.points) @ self.transform_matrix)
+        pcd_clone.points = o3d.utility.Vector3dVector(
+            np.asarray(pcd.points) @ self.transform_matrix
+        )
         grasps_clone.translations = grasps_clone.translations @ self.transform_matrix.T
         grasps_clone.rotation_matrices = (
-            self.transform_matrix @ grasps_clone.rotation_matrices @ self.transform_matrix.T
+            self.transform_matrix
+            @ grasps_clone.rotation_matrices
+            @ self.transform_matrix.T
         )
-        self.gsnet.visualize(pcd_clone, grasps_clone, image_only=image_only, save_dir=save_dir, filename=filename)
+        self.gsnet.visualize(
+            pcd_clone,
+            grasps_clone,
+            image_only=image_only,
+            save_dir=save_dir,
+            filename=filename,
+        )
 
 
 class TrajOptimizer:
@@ -315,12 +359,10 @@ class TrajOptimizer:
         robot_pose: Robot pose
         robot_config: Curobo robot config
     """
-    def __init__(self, robot_pose: List[float]):
+
+    def __init__(self):
         self.point_extractor = VLMPointExtractor()
         self.grasp_finder = GraspPoseFinder()
-        self.robot_position = np.array(robot_pose[:3])
-        self.robot_orientation = np.array(robot_pose[3:]) # quaternion
-        self.robot_rotation_matrix = R.from_quat(self.robot_orientation).as_matrix()
 
         self.robot_gripper_open_q = [0.04, 0.04]
         self.robot_gripper_close_q = [0.00, 0.00]
@@ -329,11 +371,12 @@ class TrajOptimizer:
         self.ee_n_dof = 2
 
         tensor_args = TensorDeviceType()
-        self.config_file = load_yaml(join_path(get_robot_path(), "franka.yml"))["robot_cfg"]
+        self.config_file = load_yaml(join_path(get_robot_path(), "franka.yml"))[
+            "robot_cfg"
+        ]
         # config_file = load_yaml(join_path(get_robot_path(), robot_cfg.curobo_ref_cfg_name))["robot_cfg"]
         self.robot_config = RobotConfig.from_dict(self.config_file, tensor_args)
         self.kin_model = CudaRobotModel(self.robot_config.kinematics)
-
 
     def _get_3d_point_from_pixel(self, pixel_point, depth, cam_intr_mat, cam_extr_mat):
         """
@@ -380,8 +423,9 @@ class TrajOptimizer:
         log.info(f"xyz: {xyz}")
         return xyz
 
-
-    def _filter_out_robot_from_pcd(self, pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
+    def _filter_out_robot_from_pcd(
+        self, pcd: o3d.geometry.PointCloud
+    ) -> o3d.geometry.PointCloud:
         """
         Filtering out a robot region from pcd.
         """
@@ -391,7 +435,7 @@ class TrajOptimizer:
         points = np.array(pcd.points)
         colors = np.array(pcd.colors)
 
-        robot_offset = np.array([0.0, 0.0, 1.0]) + self.robot_position
+        robot_offset = np.array([0.0, 0.0, 1.0])
         robot_dimension = np.array([0.3, 0.3, 2.0])
         point_mask = np.logical_and(
             np.logical_or(
@@ -399,7 +443,7 @@ class TrajOptimizer:
                 np.abs(points[:, 1] - robot_offset[1]) > robot_dimension[1] / 2,
                 np.abs(points[:, 2] - robot_offset[2]) > robot_dimension[2] / 2,
             ),
-            points[:, 2] < 0.2 + self.robot_position[2],
+            points[:, 2] < 0.2,
         )
         points_filtered = points[point_mask]
         colors_filtered = colors[point_mask]
@@ -417,13 +461,8 @@ class TrajOptimizer:
         """Convert the grasp pose to franka end-effector pose."""
         positions = grasps.translations.copy()
         rotations = grasps.rotation_matrices.copy()
-        positions, rotations = self._world_to_franka(positions, rotations)
 
         # franka transform
-        franka_L = np.diag([1, -1, 1])
-        franka_R = np.array([[0, 0, -1], [0, 1, 0], [-1, 0, 0]])
-        rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
-
         quats = R.from_matrix(rotations).as_quat()
 
         # convert ee pose to tcp pose
@@ -438,33 +477,37 @@ class TrajOptimizer:
         ee_quat_target = quats.to("cuda:0").unsqueeze(0)
         return ee_pos_target, ee_quat_target
 
-    def _ee_pose_from_tcp_pose(self, tcp_pos, tcp_quat, depth):
+    def _ee_pose_from_tcp_pose(self, tcp_pos, tcp_quat, depth=0.0):
         tcp_rel_pos = (
-            (torch.tensor(self.robot_tcp_rel_pos) + torch.tensor([0.0, 0.0, -depth])).unsqueeze(0).to(tcp_pos.device)
+            (torch.tensor(self.robot_tcp_rel_pos) + torch.tensor([0.0, 0.0, -depth]))
+            .unsqueeze(0)
+            .to(tcp_pos.device)
         )
-        ee_pos = tcp_pos + torch.matmul(
-            matrix_from_quat(tcp_quat),
-            -tcp_rel_pos.unsqueeze(-1)
-        ).squeeze()
+        ee_pos = (
+            tcp_pos
+            + torch.matmul(
+                matrix_from_quat(tcp_quat), -tcp_rel_pos.unsqueeze(-1)
+            ).squeeze()
+        )
         return ee_pos, tcp_quat
-
-    def _world_to_franka(self, positions, rotations):
-        positions = self.robot_position + positions @ self.robot_rotation_matrix.T
-        rotations = self.robot_rotation_matrix @ rotations @ self.robot_rotation_matrix.T
-        return positions, rotations
 
     def _set_motion_gen_with_pcd(self, pcd):
         world_cfg = WorldConfig(
             cuboid=[
                 Cuboid(
                     name="ground",
-                    pose=[0.0, 0.0, -0.4, 0.0, 0.0, 0.0, 1.0],
+                    pose=[0.0, 0.0, -0.4, 1.0, 0.0, 0.0, 0.0],
                     dims=[10.0, 10.0, 0.8],
                 ),
             ],
             # TODO: is there any better method (using nvblox?)
-            # TODO: get robot position and quaternion from args and apply to mesh pose
-            # mesh=[Mesh.from_pointcloud(np.asarray(pcd.points), pose=[0.0, 0.0, 0.0, 1, 0, 0, 0], pitch=0.005)],
+            mesh=[
+                Mesh.from_pointcloud(
+                    np.asarray(pcd.points),
+                    pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],
+                    pitch=0.005,
+                )
+            ],
         )
         world_cfg.save_world_as_mesh("outputs/world.ply")
         motion_gen_config = MotionGenConfig.load_from_robot_config(
@@ -482,9 +525,12 @@ class TrajOptimizer:
 
     def do_fk(self, q: torch.Tensor):
         log.info(f"q: {q}")
-        robot_state = self.kin_model.get_state(q[:self.curobo_n_dof], self.config_file["kinematics"]["ee_link"])
-        return robot_state.ee_position.unsqueeze(0), robot_state.ee_quaternion.unsqueeze(0)
-
+        robot_state = self.kin_model.get_state(
+            q[: self.curobo_n_dof], self.config_file["kinematics"]["ee_link"]
+        )
+        return robot_state.ee_position.unsqueeze(
+            0
+        ), robot_state.ee_quaternion.unsqueeze(0)
 
     def get_plan_config(self):
         return MotionGenPlanConfig(
@@ -498,8 +544,8 @@ class TrajOptimizer:
 
     def get_joint_state(self, joint_pos: torch.Tensor):
         cu_js = JointState.from_position(
-            position=joint_pos[:, :self.curobo_n_dof],
-            joint_names=list(self.kin_model.joint_names)
+            position=joint_pos[:, : self.curobo_n_dof],
+            joint_names=list(self.kin_model.joint_names),
         )
         return cu_js
 
@@ -507,10 +553,15 @@ class TrajOptimizer:
         joint_pos = js.position.squeeze().repeat(step, 1)
         # if joint pos does not include ee dof, add zero to the end
         if joint_pos.shape[1] != self.curobo_n_dof + self.ee_n_dof:
-            joint_pos = torch.cat([
-                joint_pos,
-                torch.zeros((joint_pos.shape[0], self.ee_n_dof), device=joint_pos.device)],
-                dim=1)
+            joint_pos = torch.cat(
+                [
+                    joint_pos,
+                    torch.zeros(
+                        (joint_pos.shape[0], self.ee_n_dof), device=joint_pos.device
+                    ),
+                ],
+                dim=1,
+            )
         joint_pos[:, -self.ee_n_dof :] = torch.tensor(
             self.robot_gripper_open_q if open_gripper else self.robot_gripper_close_q
         )
@@ -521,7 +572,7 @@ class TrajOptimizer:
         js: JointState,
         ee_pos_target: torch.Tensor,
         ee_quat_target: torch.Tensor,
-        depth: float = 0.03, # TODO: use depth from grasp finder
+        depth: float = 0.03,  # TODO: use depth from grasp finder
     ):
         """Plan the grasp."""
         ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
@@ -541,7 +592,11 @@ class TrajOptimizer:
                 position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
                 quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
             ),
-            disable_collision_links=["panda_hand", "panda_leftfinger", "panda_rightfinger"],
+            disable_collision_links=[
+                "panda_hand",
+                "panda_leftfinger",
+                "panda_rightfinger",
+            ],
         )
         log.debug(f"Motion planning result:{result.success}")
         if not result.success:
@@ -552,18 +607,26 @@ class TrajOptimizer:
         log.debug(f"Grasp index: {index}")
 
         def trajectory_plan(plan, open_gripper=False):
-            joint_pos = torch.zeros((plan.shape[0], self.curobo_n_dof + self.ee_n_dof), device="cuda:0")
+            joint_pos = torch.zeros(
+                (plan.shape[0], self.curobo_n_dof + self.ee_n_dof), device="cuda:0"
+            )
             joint_pos[:, : self.curobo_n_dof] = plan[:, :].position
             joint_pos[:, -self.ee_n_dof :] = torch.tensor(
-                self.robot_gripper_open_q if open_gripper else self.robot_gripper_close_q
+                self.robot_gripper_open_q
+                if open_gripper
+                else self.robot_gripper_close_q
             )
             return joint_pos
 
         joint_pos = []
-        joint_pos.append(trajectory_plan(result.grasp_interpolated_trajectory, open_gripper=True))
+        joint_pos.append(
+            trajectory_plan(result.grasp_interpolated_trajectory, open_gripper=True)
+        )
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
         joint_pos.append(self.plan_gripper(cu_js, open_gripper=False, step=20))
-        joint_pos.append(trajectory_plan(result.retract_interpolated_trajectory, open_gripper=False))
+        joint_pos.append(
+            trajectory_plan(result.retract_interpolated_trajectory, open_gripper=False)
+        )
         joint_pos = torch.cat(joint_pos, dim=0)
         return joint_pos
 
@@ -572,7 +635,7 @@ class TrajOptimizer:
         js: JointState,
         ee_pos_target: torch.Tensor,
         ee_quat_target: torch.Tensor,
-        open_gripper: bool = False
+        open_gripper: bool = False,
     ):
         """Move the robot to the target pose."""
         ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
@@ -588,15 +651,18 @@ class TrajOptimizer:
             return None
 
         cmd_plan = result.get_interpolated_plan().position
-        joint_pos = torch.zeros((cmd_plan.shape[0], self.curobo_n_dof + self.ee_n_dof), device="cuda:0")
+        joint_pos = torch.zeros(
+            (cmd_plan.shape[0], self.curobo_n_dof + self.ee_n_dof), device="cuda:0"
+        )
         joint_pos[:, : self.curobo_n_dof] = cmd_plan[:, :]
         joint_pos[:, -self.ee_n_dof :] = torch.tensor(
             self.robot_gripper_open_q if open_gripper else self.robot_gripper_close_q
         )
         return joint_pos
 
-
-    def plan_trajectory(self, js: JointState, img, depth, pcd, prompt, camera_intr_mat, camera_extr_mat):
+    def plan_trajectory(
+        self, js: JointState, img, depth, pcd, prompt, camera_intr_mat, camera_extr_mat
+    ):
         seq = self.point_extractor.extract_sequence(img, prompt)
         assert isinstance(seq, list) and len(seq) > 0, "No valid action sequence found"
 
@@ -606,10 +672,13 @@ class TrajOptimizer:
         end_point = seq[0]["put_down"]
 
         log.info(f"3d point of pixel: {start_point} / {end_point}")
-        start_point_3d = self._get_3d_point_from_pixel(start_point, depth, camera_intr_mat, camera_extr_mat)
-        end_point_3d = self._get_3d_point_from_pixel(end_point, depth, camera_intr_mat, camera_extr_mat)
+        start_point_3d = self._get_3d_point_from_pixel(
+            start_point, depth, camera_intr_mat, camera_extr_mat
+        )
+        end_point_3d = self._get_3d_point_from_pixel(
+            end_point, depth, camera_intr_mat, camera_extr_mat
+        )
 
-        # TODO: get robot pose from this function
         pcd = self._filter_out_robot_from_pcd(pcd)
         self._set_motion_gen_with_pcd(pcd)
 
@@ -620,11 +689,11 @@ class TrajOptimizer:
 
         # TODO: fix visualization bug
         # self.grasp_finder.visualize(
-            # pcd,
-            # gg[0:N],
-            # image_only=True,
-            # save_dir="3_object_grasping_vlm",
-            # filename=f"qwen2.5vl_top_one_{prompt}",
+        # pcd,
+        # gg[0:N],
+        # image_only=True,
+        # save_dir="output",
+        # filename=f"qwen2.5vl_top_one_{prompt}",
         # )
         # log.info(f"Grasp candidates: {gg[:N]}")
         ee_pos_pickup, ee_quat_pickup = self._grasp_to_franka(gg[:N])
@@ -639,15 +708,26 @@ class TrajOptimizer:
 
         # Pick up
         ee_pos_pickup[:, :, 2] += 0.2
-        joint_pos.append(self.plan_pose_single(cu_js, ee_pos_pickup, ee_quat_pickup, open_gripper=False))
+        joint_pos.append(
+            self.plan_pose_single(
+                cu_js, ee_pos_pickup, ee_quat_pickup, open_gripper=False
+            )
+        )
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
         # Put down
-        tcp_pos_putdown, _ = self._world_to_franka(np.array([end_point_3d]), np.eye(3))
-        tcp_pos_putdown = torch.tensor(tcp_pos_putdown, dtype=torch.float32).unsqueeze(1).to("cuda:0")
+        tcp_pos_putdown = torch.tensor([[end_point_3d]], dtype=torch.float32).to(
+            "cuda:0"
+        )
         tcp_pos_putdown[:, :, 2] += 0.3  # lift up a bit
-        ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(tcp_pos_putdown, ee_quat_pickup, 0.03)
-        joint_pos.append(self.plan_pose_single(cu_js, ee_pos_putdown[0], ee_quat_putdown[0], open_gripper=False))
+        ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(
+            tcp_pos_putdown, ee_quat_pickup, 0.03
+        )
+        joint_pos.append(
+            self.plan_pose_single(
+                cu_js, ee_pos_putdown[0], ee_quat_putdown[0], open_gripper=False
+            )
+        )
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
         # Open Gripper
@@ -658,6 +738,7 @@ class TrajOptimizer:
         # Concat All Plans
         joint_pos = torch.cat(joint_pos, dim=0)
         return joint_pos
+
 
 @torch.jit.script
 def matrix_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
