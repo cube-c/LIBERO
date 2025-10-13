@@ -1,6 +1,6 @@
 [submodule "third_party/curobo"]
 	path = third_party/curobo
-	url = https://github.com/RoboVerseOrg/curobo.git
+	url = https://github.com/NVlabs/curobo.git
 
 [submodule "third_party/gsnet"]
 	path = third_party/gsnet
