@@ -333,7 +333,6 @@ class TrajOptimizer:
         # config_file = load_yaml(join_path(get_robot_path(), robot_cfg.curobo_ref_cfg_name))["robot_cfg"]
         self.robot_config = RobotConfig.from_dict(self.config_file, tensor_args)
         self.kin_model = CudaRobotModel(self.robot_config.kinematics)
-        log.info(f"Joint names: {self.kin_model.joint_names}")
 
 
     def _get_3d_point_from_pixel(self, pixel_point, depth, cam_intr_mat, cam_extr_mat):
@@ -400,7 +399,7 @@ class TrajOptimizer:
                 np.abs(points[:, 1] - robot_offset[1]) > robot_dimension[1] / 2,
                 np.abs(points[:, 2] - robot_offset[2]) > robot_dimension[2] / 2,
             ),
-            points[:, 2] < 0.3,
+            points[:, 2] < 0.2 + self.robot_position[2],
         )
         points_filtered = points[point_mask]
         colors_filtered = colors[point_mask]
@@ -459,15 +458,15 @@ class TrajOptimizer:
             cuboid=[
                 Cuboid(
                     name="ground",
-                    pose=[0.0, 0.0, -0.4, 1.0, 0.0, 0.0, 0.0],
+                    pose=[0.0, 0.0, -0.4, 0.0, 0.0, 0.0, 1.0],
                     dims=[10.0, 10.0, 0.8],
                 ),
             ],
             # TODO: is there any better method (using nvblox?)
             # TODO: get robot position and quaternion from args and apply to mesh pose
-            mesh=[Mesh.from_pointcloud(np.asarray(pcd.points), pose=[1.15, 0.0, 0.0, 0, 0, 0, 1], pitch=0.005)],
+            # mesh=[Mesh.from_pointcloud(np.asarray(pcd.points), pose=[0.0, 0.0, 0.0, 1, 0, 0, 0], pitch=0.005)],
         )
-        world_cfg.save_world_as_mesh("get_started/output/motion_planning/3_object_grasping_vlm/world.ply")
+        world_cfg.save_world_as_mesh("outputs/world.ply")
         motion_gen_config = MotionGenConfig.load_from_robot_config(
             self.robot_config,
             world_cfg,
@@ -618,15 +617,18 @@ class TrajOptimizer:
         N = 8
         gg = self.grasp_finder.find(pcd)
         gg = self._sorted_grasp_by_distance(start_point_3d, gg)
-        self.grasp_finder.visualize(
-            pcd,
-            gg[0:N],
-            image_only=True,
-            save_dir="3_object_grasping_vlm",
-            filename=f"qwen2.5vl_top_one_{prompt}",
-        )
-        log.info(f"Grasp candidates: {gg[:N]}")
+
+        # TODO: fix visualization bug
+        # self.grasp_finder.visualize(
+            # pcd,
+            # gg[0:N],
+            # image_only=True,
+            # save_dir="3_object_grasping_vlm",
+            # filename=f"qwen2.5vl_top_one_{prompt}",
+        # )
+        # log.info(f"Grasp candidates: {gg[:N]}")
         ee_pos_pickup, ee_quat_pickup = self._grasp_to_franka(gg[:N])
+        log.info(f"ee_pos_pickup: {ee_pos_pickup}, ee_quat_pickup: {ee_quat_pickup}")
 
         # Grasp
         joint_pos = []

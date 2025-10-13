@@ -21,7 +21,7 @@ from curobo.types.robot import JointState
 rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
-H, W = 256, 256
+H, W = 1024, 1024
 
 
 def depth_buffer_to_depth_image(depth, zfar, znear):
@@ -128,7 +128,6 @@ def get_point_cloud_from_obs(obs, zfar, znear, camera_names=["agentview", "sidev
     pcd_merged = o3d.geometry.PointCloud()
     pcd_merged.points = o3d.utility.Vector3dVector(all_points)
     pcd_merged.colors = o3d.utility.Vector3dVector(all_colors)
-    o3d.io.write_point_cloud("outputs/merged.ply", pcd_merged)
 
     return pcd_merged, depth1, intr, extr
 
@@ -148,6 +147,7 @@ def step_to_target_pos(env, obs, target_pos):
     return env.step(diff.tolist())
 
 
+
 class MotionController:
     """
     MotionController is used to control the robot from prompt.
@@ -164,67 +164,83 @@ class MotionController:
         self.env = env
         self.obs = obs
         self.traj_optimizer = traj_optimizer
+        self.images = []
 
     def dummy_action(self, step: int):
-        return torch.zeros((step, 8))
-
-    def wrap_action(self, actions):
-        if self.sim == "isaaclab":
-            return [
-                {
-                    "dof_pos_target": dict(
-                        zip(self.robot.actuators.keys(), action.tolist())
-                    )
-                }
-                for action in actions
-            ]
-        elif self.sim == "mujoco":
-            return [
-                {
-                    self.robot.name: {
-                        "dof_pos_target": dict(
-                            zip(self.robot.actuators.keys(), action.tolist())
-                        )
-                    }
-                }
-                for action in actions
-            ]
-        else:
-            raise ValueError(f"Invalid simulator: {self.sim}")
+        return torch.zeros((step, 9))
 
     def get_joint_state(self):
         """Get the current joint position."""
-        joint_reindex = self.env.handler.get_joint_reindex(self.robot.name)
-        joint_pos = (
-            self.env.handler.get_states().robots[self.robot.name].joint_pos.cuda()
-        )
+        joint_pos = get_joint_state_from_obs(self.obs)
+        joint_pos[8] = -joint_pos[8]
         js = JointState.from_position(
-            position=joint_pos[:, torch.argsort(torch.tensor(joint_reindex))],
-            joint_names=list(self.robot.actuators.keys()),
+            position=joint_pos.unsqueeze(0).to(torch.float32).to("cuda:0"),
+            joint_names=[
+                "panda_joint1", 
+                "panda_joint2", 
+                "panda_joint3", 
+                "panda_joint4",
+                "panda_joint5",
+                "panda_joint6",
+                "panda_joint7",
+                "panda_finger_joint1",
+                "panda_finger_joint2",
+            ],
         )
         log.info(f"Current robot joint state: {js}")
         return js
 
     def act(self, actions, save_obs: bool = True):
-        """Act the robot and save the observation"""
-        actions = self.wrap_action(actions)
         for action in actions:
             # log.info(f"Action: {action}")
-            obs, _, _, _, _ = self.env.step([action])
+            obs, _, _, _ = step_to_target_pos(self.env, self.obs, action.detach().cpu())
+            self.obs = obs
             if save_obs:
-                obs = self.env.handler.get_states()
-                self.obs_saver.add(obs)
+                self.images.append(obs["agentview_image"][::-1])
         if save_obs:
-            self.obs_saver.save()
+            self.make_video()
+
         return obs
+
+    def get_point_cloud_from_obs(self):
+        # point cloud from agentview
+        sim = self.env.env.sim
+        extent = float(sim.model.stat.extent)
+        zfar = sim.model.vis.map.zfar * extent
+        znear = sim.model.vis.map.znear * extent
+        pcd, depth, intr, extr = get_point_cloud_from_obs(self.obs, zfar, znear)
+
+        return pcd, depth, intr, extr
+
+    def pcd_to_robot_center(self, pcd):
+        points = np.asarray(pcd.points)
+
+        robot = self.env.env.robots[0]
+        sim = self.env.env.sim
+        bid = sim.model.body_name2id(robot.robot_model.root_body)
+        robot_position = sim.data.body_xpos[bid].copy() 
+        robot_rotation_matrix = sim.data.body_xmat[bid].reshape(3, 3).copy()
+
+        points = points - robot_position
+        points = points @ robot_rotation_matrix.T
+        pcd.points = o3d.utility.Vector3dVector(points)
+        return pcd, robot_position, robot_rotation_matrix
 
     def simulate_from_prompt(self, prompt: str):
         """Simulate the robot from prompt."""
-        actions = self.dummy_action(120)
-        obs = self.act(actions, save_obs=False)
+        actions = self.dummy_action(10)
+        obs = self.act(actions, save_obs=True)
 
-        img = Image.fromarray(obs.cameras["camera0"].rgb[0].cpu().numpy())
-        pcd, depth, cam_intr_mat, cam_extr_mat = get_point_cloud_from_obs(obs)
+        img = Image.fromarray(obs["agentview_image"][::-1])
+        pcd, depth, cam_intr_mat, cam_extr_mat = self.get_point_cloud_from_obs()
+        pcd, robot_position, robot_rotation_matrix = self.pcd_to_robot_center(pcd)
+        o3d.io.write_point_cloud("outputs/merged.ply", pcd)
+
+        # transform camera extrinsic matrix with respect to robot center and rotation matrix
+        T_robot = np.eye(4, dtype=np.float64)
+        T_robot[:3, :3] = robot_rotation_matrix
+        T_robot[:3,  3] = robot_position
+        cam_extr_mat = cam_extr_mat @ T_robot
 
         js = self.get_joint_state()
         actions = self.traj_optimizer.plan_trajectory(
@@ -232,6 +248,13 @@ class MotionController:
         )
         obs = self.act(actions, save_obs=True)
         return obs
+
+    def make_video(self):
+        # make video
+        video_writer = imageio.get_writer("outputs/test.mp4", fps=30)
+        for image in self.images:
+            video_writer.append_data(image)
+        video_writer.close()
 
 
 if __name__ == "__main__":
@@ -277,43 +300,18 @@ if __name__ == "__main__":
 
     env.reset()
 
-    # Initial pose by franka cfg (see RoboVerse/roboverse_pack/robots/franka_cfg.py)
-    target_pos = torch.tensor(
-        [0.0, -0.785398, 0.0, -2.356194, 0.0, 1.570796, 0.785398, 0.04, 0.04]
-    )
-
     for eval_index in range(len(init_states)):
         images = []
         obs = env.set_init_state(init_states[eval_index])
 
         sim = env.env.sim
         robot = env.env.robots[0]
-        bid = sim.model.body_name2id(robot.robot_model.root_body)
-        p_wb = sim.data.body_xpos[bid].copy()  # (3,) position [m] in world
-        q_wb = sim.data.body_xquat[bid].copy()  # (w, x, y, z) quaternion
 
-        log.info(f"p_wb: {p_wb}, q_wb: {q_wb}")
-
-        traj_optimizer = TrajOptimizer(p_wb.tolist() + q_wb.tolist())
+        traj_optimizer = TrajOptimizer([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
         mc = MotionController(env, obs, traj_optimizer)
 
-        # point cloud from agentview
-        extent = float(sim.model.stat.extent)
-        zfar = sim.model.vis.map.zfar * extent
-        znear = sim.model.vis.map.znear * extent
-        pcd, depth, intr, extr = get_point_cloud_from_obs(obs, zfar, znear)
+        mc.simulate_from_prompt("pick up the bbq sauce and place it in the basket")
 
-        # action
-        for _ in range(200):
-            obs, _, _, _ = step_to_target_pos(env, obs, target_pos)
-            # images.append(obs["agentview_image"])
-            images.append(obs["sideview_image"])
-
-        # make video
-        video_writer = imageio.get_writer("test.mp4", fps=30)
-        for image in images:
-            video_writer.append_data(image[::-1])
-        video_writer.close()
         break
 
     env.close()
