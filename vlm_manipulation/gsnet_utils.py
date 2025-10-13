@@ -24,7 +24,9 @@ class GSNet:
 
     def __init__(self):
         """This function is used to initialize the configuration."""
-        self.checkpoint_path = "third_party/gsnet/assets/minkuresunet_realsense_tune_epoch20.tar"
+        self.checkpoint_path = (
+            "third_party/gsnet/assets/minkuresunet_realsense_tune_epoch20.tar"
+        )
         self.seed_feat_dim = 512
         self.num_point = 15000
         self.batch_size = 1
@@ -46,7 +48,9 @@ class GSNet:
             # print("sampled point cloud idxs:", idxs.shape)
         else:
             idxs1 = np.arange(len(cloud_masked))
-            idxs2 = np.random.choice(len(cloud_masked), self.num_point - len(cloud_masked), replace=True)
+            idxs2 = np.random.choice(
+                len(cloud_masked), self.num_point - len(cloud_masked), replace=True
+            )
             idxs = np.concatenate([idxs1, idxs2], axis=0)
         cloud_sampled = cloud_masked[idxs]
 
@@ -93,8 +97,12 @@ class GSNet:
             cloud = data_dict["point_clouds"]
 
             # Model-free collision detector
-            mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=self.voxel_size_cd)
-            collision_mask_mfc = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=self.collision_thresh)
+            mfcdetector = ModelFreeCollisionDetector(
+                cloud, voxel_size=self.voxel_size_cd
+            )
+            collision_mask_mfc = mfcdetector.detect(
+                gg, approach_dist=0.05, collision_thresh=self.collision_thresh
+            )
             gg = gg[~collision_mask_mfc]
 
         gg = gg.nms()
@@ -105,7 +113,14 @@ class GSNet:
 
         return gg
 
-    def visualize(self, cloud, gg: GraspGroup = None, g: Grasp = None, image_only=False, filename=None, save_dir=""):
+    def visualize(
+        self,
+        cloud,
+        gg: GraspGroup = None,
+        g: Grasp = None,
+        image_only=False,
+        filename=None,
+    ):
         """This function is used to visualize the grasp group or grasp."""
         pcd = cloud
         if image_only:
@@ -114,7 +129,9 @@ class GSNet:
 
             # along to x-axis
             rotation = np.array([[0, 1, 0], [0, 0, -1], [-1, 0, 0]])
-            rotation_tilt = np.array([[1, 0, 0], [0, np.cos(70), -np.sin(70)], [0, np.sin(70), np.cos(70)]])
+            rotation_tilt = np.array(
+                [[1, 0, 0], [0, np.cos(70), -np.sin(70)], [0, np.sin(70), np.cos(70)]]
+            )
 
             # along to -x-axis
             # rotation = np.array([
@@ -193,7 +210,8 @@ class GSNet:
 
             image = np.asarray(image)
             imageio.imwrite(
-                f"get_started/output/motion_planning/{save_dir}/{filename}_gsnet_visualization.png", (image * 255).astype(np.uint8)
+                filename if filename is not None else "gsnet_visualization.png",
+                (image * 255).astype(np.uint8),
             )
             vis.destroy_window()
             return

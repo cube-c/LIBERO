@@ -309,7 +309,7 @@ if __name__ == "__main__":
         traj_optimizer = TrajOptimizer()
         mc = MotionController(env, obs, traj_optimizer)
 
-        mc.simulate_from_prompt("pick up the bbq sauce and place it in the basket")
+        mc.simulate_from_prompt("pick up the tomato ketchup and place it in the basket")
 
         break
 

@@ -323,8 +323,7 @@ class GraspPoseFinder:
         pcd: o3d.geometry.PointCloud,
         grasps,
         image_only=False,
-        save_dir="",
-        filename="",
+        filename=None,
     ):
         pcd_clone = copy.deepcopy(pcd)
         grasps_clone = copy.deepcopy(grasps)
@@ -341,7 +340,6 @@ class GraspPoseFinder:
             pcd_clone,
             grasps_clone,
             image_only=image_only,
-            save_dir=save_dir,
             filename=filename,
         )
 
@@ -463,9 +461,13 @@ class TrajOptimizer:
         rotations = grasps.rotation_matrices.copy()
 
         # franka transform
+        franka_L = np.diag([1, -1, 1])
+        franka_R = np.array([[0, 0, 1], [0, -1, 0], [1, 0, 0]])
+        rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
+
         quats = R.from_matrix(rotations).as_quat()
 
-        # convert ee pose to tcp pose
+        # convert ee pose from tcp pose
         positions, quats = self._ee_pose_from_tcp_pose(
             tcp_pos=torch.tensor(positions, dtype=torch.float32),
             tcp_quat=torch.tensor(quats, dtype=torch.float32),
@@ -692,8 +694,7 @@ class TrajOptimizer:
         # pcd,
         # gg[0:N],
         # image_only=True,
-        # save_dir="output",
-        # filename=f"qwen2.5vl_top_one_{prompt}",
+        # filename=f"outputs/gsnet.png",
         # )
         # log.info(f"Grasp candidates: {gg[:N]}")
         ee_pos_pickup, ee_quat_pickup = self._grasp_to_franka(gg[:N])
