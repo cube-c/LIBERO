@@ -273,12 +273,12 @@ class GraspPoseFinder:
     def find(self, pcd: o3d.geometry.PointCloud):
         points = np.array(pcd.points)
         colors = np.array(pcd.colors)
-        log.info(f"Point cloud shape: {points.shape}")
-        log.info(
-            f"Point cloud bounds: X[{points[:, 0].min():.3f}, {points[:, 0].max():.3f}], "
-            f"Y[{points[:, 1].min():.3f}, {points[:, 1].max():.3f}], "
-            f"Z[{points[:, 2].min():.3f}, {points[:, 2].max():.3f}]"
-        )
+        # log.info(f"Point cloud shape: {points.shape}")
+        # log.info(
+        # f"Point cloud bounds: X[{points[:, 0].min():.3f}, {points[:, 0].max():.3f}], "
+        # f"Y[{points[:, 1].min():.3f}, {points[:, 1].max():.3f}], "
+        # f"Z[{points[:, 2].min():.3f}, {points[:, 2].max():.3f}]"
+        # )
 
         point_mask = np.logical_and(
             points[:, 2] <= 0.2,
@@ -298,7 +298,7 @@ class GraspPoseFinder:
         )
         pcd.points = o3d.utility.Vector3dVector(points_masked)
         pcd.colors = o3d.utility.Vector3dVector(colors_masked)
-        o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
+        # o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
 
         grasps = self.gsnet.inference(np.array(pcd.points) @ self.transform_matrix)
         grasps.translations = grasps.translations @ self.transform_matrix.T
@@ -501,15 +501,15 @@ class TrajOptimizer:
                 ),
             ],
             # TODO: is there any better method (using nvblox?)
-            # mesh=[
-            # Mesh.from_pointcloud(
-            # np.asarray(pcd.points),
-            # pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],
-            # pitch=0.005,
-            # )
-            # ],
+            mesh=[
+                Mesh.from_pointcloud(
+                    np.asarray(pcd.points),
+                    pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],
+                    pitch=0.005,
+                )
+            ],
         )
-        world_cfg.save_world_as_mesh("outputs/world.ply")
+        # world_cfg.save_world_as_mesh("outputs/world.ply")
         motion_gen_config = MotionGenConfig.load_from_robot_config(
             self.robot_config,
             world_cfg,
@@ -730,7 +730,7 @@ class TrajOptimizer:
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
         # Open Gripper
-        joint_pos.append(self.plan_gripper(cu_js, open_gripper=True, step=20))
+        joint_pos.append(self.plan_gripper(cu_js, open_gripper=True, step=40))
 
         # TODO: attach object to robot
 

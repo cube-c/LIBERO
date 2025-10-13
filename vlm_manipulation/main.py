@@ -198,12 +198,10 @@ class MotionController:
             obs, _, done, _ = step_to_target_pos(
                 self.env, self.obs, action.detach().cpu()
             )
-            self.done = done
+            self.done = self.done or done
             self.obs = obs
             if save_obs:
                 self.images.append(obs["agentview_image"][::-1])
-        if save_obs:
-            self.make_video()
 
     def get_point_cloud(self):
         # point cloud from agentview
@@ -236,7 +234,7 @@ class MotionController:
         img = Image.fromarray(self.obs["agentview_image"][::-1])
         pcd, depth, cam_intr_mat, cam_extr_mat = self.get_point_cloud()
         pcd, robot_position, robot_rotation_matrix = self.pcd_to_robot_center(pcd)
-        o3d.io.write_point_cloud("outputs/merged.ply", pcd)
+        # o3d.io.write_point_cloud("outputs/merged.ply", pcd)
 
         # transform camera extrinsic matrix with respect to robot center and rotation matrix
         T_robot = np.eye(4, dtype=np.float64)
@@ -251,9 +249,12 @@ class MotionController:
         self.act(actions, save_obs=True)
         return self.obs, self.done
 
-    def make_video(self):
+    def make_video(self, task_id=None, eval_index=None):
         # make video
-        video_writer = imageio.get_writer("outputs/test.mp4", fps=30)
+        video_writer = imageio.get_writer(
+            f"outputs/test_{task_id if task_id is not None else 'latest'}_{eval_index if eval_index is not None else 'latest'}_{'success' if self.done else 'fail'}.mp4",
+            fps=30,
+        )
         for image in self.images:
             video_writer.append_data(image)
         video_writer.close()
@@ -284,58 +285,61 @@ def modify_sideview_camera(env):
 if __name__ == "__main__":
     benchmark_dict = benchmark.get_benchmark_dict()
     benchmark_instance = benchmark_dict["libero_object"]()
-    # num_tasks = benchmark_instance.get_num_tasks()
+    traj_optimizer = TrajOptimizer()
 
-    # Load torch init files
-    init_states = benchmark_instance.get_task_init_states(0)
+    for task_id in range(benchmark_instance.get_num_tasks()):
+        if task_id != 2:
+            continue
+        task = benchmark_instance.get_task(task_id)
+        init_states = benchmark_instance.get_task_init_states(task_id)
+        env_args = {
+            "bddl_file_name": os.path.join(
+                get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
+            ),
+            "camera_names": camera_names,
+            "camera_depths": True,
+            "camera_heights": H,
+            "camera_widths": W,
+            "controller": "JOINT_POSITION",
+        }
 
-    # task_id is the (task_id + 1)th task in the benchmark
-    task_id = 2
-    task = benchmark_instance.get_task(task_id)
-    print(f"Task Name: {task.name}")
-    print(f"Task Description: {task.language}")
+        env = OffScreenRenderEnv(**env_args)
+        # Controller output limits
+        env.env.robot_configs[0]["controller_config"]["output_min"] = -1.0
+        env.env.robot_configs[0]["controller_config"]["output_max"] = 1.0
 
-    env_args = {
-        "bddl_file_name": os.path.join(
-            get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
-        ),
-        "camera_names": camera_names,
-        "camera_depths": True,
-        "camera_heights": H,
-        "camera_widths": W,
-        "controller": "JOINT_POSITION",
-    }
+        print(f"Task Name: {task.name}")
+        print(f"Task Description: {task.language}")
 
-    env = OffScreenRenderEnv(**env_args)
+        success = 0
+        total = 0
 
-    # Controller output limits
-    env.env.robot_configs[0]["controller_config"]["output_min"] = -1.0
-    env.env.robot_configs[0]["controller_config"]["output_max"] = 1.0
+        for eval_index in range(min(len(init_states), 10)):
+            # Fix random seeds for reproducibility
+            env.seed(0)
+            env.reset()
 
-    init_states = benchmark_instance.get_task_init_states(task_id)
+            obs = env.set_init_state(init_states[eval_index])
+            sim = env.env.sim
+            robot = env.env.robots[0]
 
-    # Fix random seeds for reproducibility
-    env.seed(0)
+            # since the sideview camera is too high that the objects are not visible,
+            # we need to modify the camera position
+            modify_sideview_camera(env)
 
-    env.reset()
+            try:
+                mc = MotionController(env, obs, traj_optimizer)
+                obs, done = mc.simulate_from_prompt(task.language)
+                mc.make_video(task_id, eval_index)
+                if done:
+                    success += 1
+            except Exception as e:
+                log.error(f"Error: {e}")
+            total += 1
+            log.info(f"Success Rate for Task {task_id}: {success} / {total}")
 
-    for eval_index in range(len(init_states)):
-        images = []
-        obs = env.set_init_state(init_states[eval_index])
+        # log to external file
+        with open("outputs/success_rate.txt", "a") as f:
+            f.write(f"Task {task_id}: {success} / {total}\n")
 
-        sim = env.env.sim
-        robot = env.env.robots[0]
-
-        # since the sideview camera is too high that the objects are not visible,
-        # we need to modify the camera position
-        modify_sideview_camera(env)
-
-        traj_optimizer = TrajOptimizer()
-        mc = MotionController(env, obs, traj_optimizer)
-
-        obs, done = mc.simulate_from_prompt(task.language)
-        print(f"Done: {done}")
-
-        break
-
-    env.close()
+        env.close()
