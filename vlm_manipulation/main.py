@@ -288,7 +288,7 @@ if __name__ == "__main__":
     traj_optimizer = TrajOptimizer()
 
     for task_id in range(benchmark_instance.get_num_tasks()):
-        if task_id != 2:
+        if task_id == 2:
             continue
         task = benchmark_instance.get_task(task_id)
         init_states = benchmark_instance.get_task_init_states(task_id)
