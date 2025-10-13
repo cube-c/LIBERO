@@ -503,13 +503,13 @@ class TrajOptimizer:
                 ),
             ],
             # TODO: is there any better method (using nvblox?)
-            mesh=[
-                Mesh.from_pointcloud(
-                    np.asarray(pcd.points),
-                    pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],
-                    pitch=0.005,
-                )
-            ],
+            # mesh=[
+                # Mesh.from_pointcloud(
+                    # np.asarray(pcd.points),
+                    # pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],
+                    # pitch=0.005,
+                # )
+            # ],
         )
         world_cfg.save_world_as_mesh("outputs/world.ply")
         motion_gen_config = MotionGenConfig.load_from_robot_config(

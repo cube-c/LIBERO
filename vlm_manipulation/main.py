@@ -22,6 +22,7 @@ rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
 H, W = 1024, 1024
+camera_names = ["agentview", "sideview"]
 
 
 def depth_buffer_to_depth_image(depth, zfar, znear):
@@ -81,7 +82,7 @@ def get_point_cloud_from_camera(img, depth, camera_name):
     return pcd, intr, extr
 
 
-def get_point_cloud_from_obs(obs, zfar, znear, camera_names=["agentview", "sideview"]):
+def get_point_cloud_from_obs(obs, zfar, znear, camera_names=camera_names):
     depth1 = depth_buffer_to_depth_image(obs[camera_names[0] + "_depth"], zfar, znear)[
         ::-1
     ]
@@ -162,6 +163,7 @@ class MotionController:
     ):
         self.env = env
         self.obs = obs
+        self.reward = 0.0
         self.traj_optimizer = traj_optimizer
         self.images = []
 
@@ -192,14 +194,15 @@ class MotionController:
     def act(self, actions, save_obs: bool = True):
         for action in actions:
             # log.info(f"Action: {action}")
-            obs, _, _, _ = step_to_target_pos(self.env, self.obs, action.detach().cpu())
+            obs, reward, _, _ = step_to_target_pos(
+                self.env, self.obs, action.detach().cpu()
+            )
+            self.reward += reward
             self.obs = obs
             if save_obs:
                 self.images.append(obs["agentview_image"][::-1])
         if save_obs:
             self.make_video()
-
-        return obs
 
     def get_point_cloud(self):
         # point cloud from agentview
@@ -227,10 +230,9 @@ class MotionController:
 
     def simulate_from_prompt(self, prompt: str):
         """Simulate the robot from prompt."""
-        actions = self.dummy_action(10)
-        obs = self.act(actions, save_obs=True)
+        self.act(self.dummy_action(10), save_obs=True)
 
-        img = Image.fromarray(obs["agentview_image"][::-1])
+        img = Image.fromarray(self.obs["agentview_image"][::-1])
         pcd, depth, cam_intr_mat, cam_extr_mat = self.get_point_cloud()
         pcd, robot_position, robot_rotation_matrix = self.pcd_to_robot_center(pcd)
         o3d.io.write_point_cloud("outputs/merged.ply", pcd)
@@ -245,8 +247,8 @@ class MotionController:
         actions = self.traj_optimizer.plan_trajectory(
             js, img, depth, pcd, prompt, cam_intr_mat, cam_extr_mat
         )
-        obs = self.act(actions, save_obs=True)
-        return obs
+        self.act(actions, save_obs=True)
+        return self.obs, self.reward
 
     def make_video(self):
         # make video
@@ -256,30 +258,37 @@ class MotionController:
         video_writer.close()
 
 
-if __name__ == "__main__":
-    benchmark_root_path = get_libero_path("benchmark_root")
-    init_states_default_path = get_libero_path("init_states")
-    datasets_default_path = get_libero_path("datasets")
-    bddl_files_default_path = get_libero_path("bddl_files")
-    benchmark_dict = benchmark.get_benchmark_dict()
-    print(benchmark_dict)
+def modify_sideview_camera(env, offset):
+    """Modify the sideview camera position at runtime"""
+    sim = env.env.sim
+    camera_id = sim.model.camera_name2id("sideview")
 
-    # initialize a benchmark
-    benchmark_instance = benchmark_dict["libero_10"]()
-    num_tasks = benchmark_instance.get_num_tasks()
+    # Update camera position
+    sim.model.cam_pos[camera_id] = sim.model.cam_pos[camera_id] + offset
+
+    # Forward the simulation to apply changes
+    sim.forward()
+
+
+if __name__ == "__main__":
+    benchmark_dict = benchmark.get_benchmark_dict()
+    benchmark_instance = benchmark_dict["libero_object"]()
+    # num_tasks = benchmark_instance.get_num_tasks()
 
     # Load torch init files
     init_states = benchmark_instance.get_task_init_states(0)
 
     # task_id is the (task_id + 1)th task in the benchmark
-    task_id = 0
+    task_id = 1
     task = benchmark_instance.get_task(task_id)
+    print(f"Task Name: {task.name}")
+    print(f"Task Description: {task.language}")
 
     env_args = {
         "bddl_file_name": os.path.join(
-            bddl_files_default_path, task.problem_folder, task.bddl_file
+            get_libero_path("bddl_files"), task.problem_folder, task.bddl_file
         ),
-        "camera_names": ["agentview", "sideview"],
+        "camera_names": camera_names,
         "camera_depths": True,
         "camera_heights": H,
         "camera_widths": W,
@@ -306,10 +315,15 @@ if __name__ == "__main__":
         sim = env.env.sim
         robot = env.env.robots[0]
 
+        # since the sideview camera is too high that the objects are not visible,
+        # we need to modify the camera position
+        modify_sideview_camera(env, np.array([0.0, 0.0, -1.0]))
+
         traj_optimizer = TrajOptimizer()
         mc = MotionController(env, obs, traj_optimizer)
 
-        mc.simulate_from_prompt("pick up the tomato ketchup and place it in the basket")
+        obs, reward = mc.simulate_from_prompt(task.language)
+        print(f"Reward: {reward}")
 
         break
 
