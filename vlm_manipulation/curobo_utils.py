@@ -280,9 +280,6 @@ class GraspPoseFinder:
             f"Z[{points[:, 2].min():.3f}, {points[:, 2].max():.3f}]"
         )
 
-        # do not consider the arm points
-        # point_mask = points[:,2] <= 0.1
-        point_mask = np.ones(points.shape[0], dtype=bool)
         point_mask = np.logical_and(
             points[:, 2] <= 0.2,
             np.logical_and(
@@ -301,6 +298,7 @@ class GraspPoseFinder:
         )
         pcd.points = o3d.utility.Vector3dVector(points_masked)
         pcd.colors = o3d.utility.Vector3dVector(colors_masked)
+        o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
 
         grasps = self.gsnet.inference(np.array(pcd.points) @ self.transform_matrix)
         grasps.translations = grasps.translations @ self.transform_matrix.T
@@ -504,11 +502,11 @@ class TrajOptimizer:
             ],
             # TODO: is there any better method (using nvblox?)
             # mesh=[
-                # Mesh.from_pointcloud(
-                    # np.asarray(pcd.points),
-                    # pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],
-                    # pitch=0.005,
-                # )
+            # Mesh.from_pointcloud(
+            # np.asarray(pcd.points),
+            # pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],
+            # pitch=0.005,
+            # )
             # ],
         )
         world_cfg.save_world_as_mesh("outputs/world.ply")
@@ -643,7 +641,6 @@ class TrajOptimizer:
         ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
         log.info(f"Target EE pose: {ik_goal}")
         log.info(f"Current robot joint state: {js}")
-        log.info(f"Current robot position shape: {js.position.shape}")
         result = self.motion_gen.plan_single(js, ik_goal, self.get_plan_config())
         log.debug(f"Motion planning result:{result.success}")
 
@@ -720,6 +717,7 @@ class TrajOptimizer:
         tcp_pos_putdown = torch.tensor([[end_point_3d]], dtype=torch.float32).to(
             "cuda:0"
         )
+
         tcp_pos_putdown[:, :, 2] += 0.3  # lift up a bit
         ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(
             tcp_pos_putdown, ee_quat_pickup, 0.03

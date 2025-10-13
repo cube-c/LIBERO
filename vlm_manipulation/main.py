@@ -10,6 +10,7 @@ import torch
 import rootutils
 from loguru import logger as log
 from rich.logging import RichHandler
+from scipy.spatial.transform import Rotation as R
 from collections import OrderedDict
 from robosuite.utils.camera_utils import (
     get_camera_intrinsic_matrix,
@@ -163,7 +164,7 @@ class MotionController:
     ):
         self.env = env
         self.obs = obs
-        self.reward = 0.0
+        self.done = False
         self.traj_optimizer = traj_optimizer
         self.images = []
 
@@ -194,10 +195,10 @@ class MotionController:
     def act(self, actions, save_obs: bool = True):
         for action in actions:
             # log.info(f"Action: {action}")
-            obs, reward, _, _ = step_to_target_pos(
+            obs, _, done, _ = step_to_target_pos(
                 self.env, self.obs, action.detach().cpu()
             )
-            self.reward += reward
+            self.done = done
             self.obs = obs
             if save_obs:
                 self.images.append(obs["agentview_image"][::-1])
@@ -248,7 +249,7 @@ class MotionController:
             js, img, depth, pcd, prompt, cam_intr_mat, cam_extr_mat
         )
         self.act(actions, save_obs=True)
-        return self.obs, self.reward
+        return self.obs, self.done
 
     def make_video(self):
         # make video
@@ -258,13 +259,23 @@ class MotionController:
         video_writer.close()
 
 
-def modify_sideview_camera(env, offset):
+def modify_sideview_camera(env):
     """Modify the sideview camera position at runtime"""
     sim = env.env.sim
     camera_id = sim.model.camera_name2id("sideview")
 
     # Update camera position
-    sim.model.cam_pos[camera_id] = sim.model.cam_pos[camera_id] + offset
+    sim.model.cam_pos[camera_id] = np.array(
+        [-0.05651774593317116, -1.2761224129427358, 0.4879572214102434]
+    )
+    sim.model.cam_quat[camera_id] = np.array(
+        [
+            0.009905065491771751,
+            -0.006877963156909582,
+            -0.5912228352893879,
+            0.806418094001364,
+        ]
+    )
 
     # Forward the simulation to apply changes
     sim.forward()
@@ -279,7 +290,7 @@ if __name__ == "__main__":
     init_states = benchmark_instance.get_task_init_states(0)
 
     # task_id is the (task_id + 1)th task in the benchmark
-    task_id = 1
+    task_id = 2
     task = benchmark_instance.get_task(task_id)
     print(f"Task Name: {task.name}")
     print(f"Task Description: {task.language}")
@@ -317,13 +328,13 @@ if __name__ == "__main__":
 
         # since the sideview camera is too high that the objects are not visible,
         # we need to modify the camera position
-        modify_sideview_camera(env, np.array([0.0, 0.0, -1.0]))
+        modify_sideview_camera(env)
 
         traj_optimizer = TrajOptimizer()
         mc = MotionController(env, obs, traj_optimizer)
 
-        obs, reward = mc.simulate_from_prompt(task.language)
-        print(f"Reward: {reward}")
+        obs, done = mc.simulate_from_prompt(task.language)
+        print(f"Done: {done}")
 
         break
 
