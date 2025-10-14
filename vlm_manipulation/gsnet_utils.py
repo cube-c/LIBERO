@@ -19,6 +19,35 @@ from third_party.gsnet.models.graspnet import GraspNet, pred_decode
 from third_party.gsnet.utils.collision_detector import ModelFreeCollisionDetector
 
 
+def render_offscreen(pcd, meshes, filename="gsnet_visualization.png"):
+    W, H = 1024, 768
+    renderer = OffscreenRenderer(W, H)
+
+    # Simple unlit material (so colors show as-is)
+    mat = MaterialRecord()
+    mat.shader = "defaultUnlit"
+
+    renderer.scene.add_geometry("pcd", pcd, mat)
+    for i, m in enumerate(meshes):
+        renderer.scene.add_geometry(f"gripper_{i}", m, mat)
+
+    # Frame camera around the whole scene
+    bbox = o3d.geometry.AxisAlignedBoundingBox.create_from_points(
+        o3d.utility.Vector3dVector(np.asarray(pcd.points))
+    )
+    for m in meshes:
+        bbox += m.get_axis_aligned_bounding_box()
+
+    center = bbox.get_center()
+    extent = np.linalg.norm(bbox.get_extent())
+    eye = center + np.array([0, 0, 1.5 * extent])  # pull back along +Z
+    up = np.array([0, 1, 0])
+
+    renderer.scene.camera.look_at(center, eye, up)
+    img = renderer.render_to_image()
+    o3d.io.write_image(filename, img)
+
+
 class GSNet:
     """This class is used to grasp an object from a point cloud."""
 

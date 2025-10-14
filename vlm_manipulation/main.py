@@ -290,7 +290,7 @@ if __name__ == "__main__":
     traj_optimizer = TrajOptimizer()
 
     for task_id in range(benchmark_instance.get_num_tasks()):
-        if task_id != 2:
+        if task_id != 0:
             continue
         task = benchmark_instance.get_task(task_id)
         init_states = benchmark_instance.get_task_init_states(task_id)
@@ -317,7 +317,9 @@ if __name__ == "__main__":
         total = 0
 
         for eval_index in range(min(len(init_states), 10)):
-            # Fix random seeds for reproducibility
+            if eval_index != 0:
+                continue
+            #     Fix random seeds for reproducibility
             env.seed(0)
             env.reset()
 

@@ -12,6 +12,7 @@ import rootutils
 import torch
 from loguru import logger as log
 from rich.logging import RichHandler
+from PIL import Image, ImageDraw
 
 rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
@@ -312,8 +313,6 @@ class GraspPoseFinder:
 
         # log best grasp candidate
         log.info(f"Total grasp candidates: {len(grasps)}")
-        log.info(f"Best grasp candidate: {grasps[0].translation}")
-        log.info(f"Best grasp candidate rotation: {grasps[0].rotation_matrix}")
 
         return grasps
 
@@ -458,31 +457,42 @@ class TrajOptimizer:
         """Convert the grasp pose to franka end-effector pose."""
         positions = grasps.translations.copy()
         rotations = grasps.rotation_matrices.copy()
+        quats = R.from_matrix(rotations).as_quat()
 
         # franka transform
         franka_L = np.diag([1, -1, 1])
-        franka_R = np.array([[0, 0, 1], [0, -1, 0], [1, 0, 0]])
+        franka_R = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
         rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
+        # rotations = rotations.transpose(0, 2, 1)
 
         quats = R.from_matrix(rotations).as_quat()
 
         # convert ee pose from tcp pose
+        log.info(f"Positions: {positions}")
+        log.info(f"Quats: {quats}")
         positions, quats = self._ee_pose_from_tcp_pose(
             tcp_pos=torch.tensor(positions, dtype=torch.float32),
             tcp_quat=torch.tensor(quats, dtype=torch.float32),
-            depth=0.03,
         )
+        grasp_offset = -torch.cat(
+            [
+                torch.zeros(len(grasps.depths), 2),
+                torch.tensor(grasps.depths, dtype=torch.float32).unsqueeze(1),
+            ],
+            dim=1,
+        ).unsqueeze(2)
+        positions = positions + torch.matmul(
+            matrix_from_quat(quats), grasp_offset
+        ).squeeze(2)
 
         # shape of (1, n_goalset, 3)
         ee_pos_target = positions.to("cuda:0").unsqueeze(0)
         ee_quat_target = quats.to("cuda:0").unsqueeze(0)
         return ee_pos_target, ee_quat_target
 
-    def _ee_pose_from_tcp_pose(self, tcp_pos, tcp_quat, depth=0.0):
+    def _ee_pose_from_tcp_pose(self, tcp_pos, tcp_quat):
         tcp_rel_pos = (
-            (torch.tensor(self.robot_tcp_rel_pos) + torch.tensor([0.0, 0.0, -depth]))
-            .unsqueeze(0)
-            .to(tcp_pos.device)
+            (torch.tensor(self.robot_tcp_rel_pos)).unsqueeze(0).to(tcp_pos.device)
         )
         ee_pos = (
             tcp_pos
@@ -573,38 +583,43 @@ class TrajOptimizer:
         js: JointState,
         ee_pos_target: torch.Tensor,
         ee_quat_target: torch.Tensor,
-        depth: float = 0.03,  # TODO: use depth from grasp finder
+        depth: float = 0.05,  # TODO: use depth from grasp finder
     ):
         """Plan the grasp."""
-        ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
-        log.debug(f"IK goal: {ik_goal}")
-        cu_js = JointState.get_ordered_joint_state(js, list(self.kin_model.joint_names))
-        log.info(f"Target EE pose: {ik_goal}")
-        log.debug(f"Current robot joint state: {cu_js}")
-        result = self.motion_gen.plan_grasp(
-            start_state=cu_js,
-            grasp_poses=ik_goal,
-            plan_config=self.get_plan_config(),
-            grasp_approach_offset=Pose(
-                position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
-                quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
-            ),
-            retract_offset=Pose(
-                position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
-                quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
-            ),
-            disable_collision_links=[
-                "panda_hand",
-                "panda_leftfinger",
-                "panda_rightfinger",
-            ],
-        )
-        log.debug(f"Motion planning result:{result.success}")
-        if not result.success:
-            log.debug("No successful grasp plan found.")
-            log.debug(f"Result: {result}")
-            return None
-        index = result.goalset_index.item()
+        for i in range(ee_pos_target.shape[1]):
+            ik_goal = Pose(
+                position=ee_pos_target[:, i : i + 1, :],
+                quaternion=ee_quat_target[:, i : i + 1, :],
+            )
+            log.debug(f"IK goal: {ik_goal}")
+            cu_js = JointState.get_ordered_joint_state(
+                js, list(self.kin_model.joint_names)
+            )
+
+            result = self.motion_gen.plan_grasp(
+                start_state=cu_js,
+                grasp_poses=ik_goal,
+                plan_config=self.get_plan_config(),
+                grasp_approach_offset=Pose(
+                    position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
+                    quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
+                ),
+                retract_offset=Pose(
+                    position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
+                    quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
+                ),
+                disable_collision_links=[
+                    "panda_hand",
+                    "panda_leftfinger",
+                    "panda_rightfinger",
+                ],
+            )
+            log.debug(f"Motion planning result:{result.success}")
+            if result.success:
+                break
+
+        # index = result.goalset_index.item()
+        index = i
         log.debug(f"Grasp index: {index}")
 
         def trajectory_plan(plan, open_gripper=False):
@@ -641,7 +656,6 @@ class TrajOptimizer:
         """Move the robot to the target pose."""
         ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
         log.info(f"Target EE pose: {ik_goal}")
-        log.info(f"Current robot joint state: {js}")
         result = self.motion_gen.plan_single(js, ik_goal, self.get_plan_config())
         log.debug(f"Motion planning result:{result.success}")
 
@@ -679,6 +693,13 @@ class TrajOptimizer:
             end_point, depth, camera_intr_mat, camera_extr_mat
         )
 
+        # TODO: add debug flag for visualization
+        # Draw image
+        draw = ImageDraw.Draw(img)
+        draw.circle(start_point, 4, fill="red")
+        draw.circle(end_point, 4, fill="blue")
+        img.save(f"outputs/image.png")
+
         pcd = self._filter_out_robot_from_pcd(pcd)
         self._set_motion_gen_with_pcd(pcd)
 
@@ -695,7 +716,6 @@ class TrajOptimizer:
         # filename=f"outputs/gsnet.png",
         # )
         ee_pos_pickup, ee_quat_pickup = self._grasp_to_franka(gg[:N])
-        log.info(f"ee_pos_pickup: {ee_pos_pickup}, ee_quat_pickup: {ee_quat_pickup}")
 
         # Grasp
         joint_pos = []
@@ -706,27 +726,64 @@ class TrajOptimizer:
 
         # Pick up
         ee_pos_pickup[:, :, 2] += 0.2
+        self.motion_gen.toggle_link_collision(
+            ["panda_hand", "panda_leftfinger", "panda_rightfinger"], False
+        )
         joint_pos.append(
             self.plan_pose_single(
                 cu_js, ee_pos_pickup, ee_quat_pickup, open_gripper=False
             )
         )
+        self.motion_gen.toggle_link_collision(
+            ["panda_hand", "panda_leftfinger", "panda_rightfinger"], True
+        )
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
         # Put down
-        tcp_pos_putdown = torch.tensor([[end_point_3d]], dtype=torch.float32).to(
-            "cuda:0"
+        tcp_pos_putdown = (
+            torch.tensor(end_point_3d, dtype=torch.float32)
+            .to("cuda:0")
+            .unsqueeze(0)
+            .unsqueeze(0)
         )
 
         tcp_pos_putdown[:, :, 2] += 0.3  # lift up a bit
         ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(
-            tcp_pos_putdown, ee_quat_pickup, 0.03
+            tcp_pos_putdown, ee_quat_pickup
         )
+
         joint_pos.append(
             self.plan_pose_single(
                 cu_js, ee_pos_putdown[0], ee_quat_putdown[0], open_gripper=False
             )
         )
+        if joint_pos[-1] is None:
+            joint_pos = joint_pos[:-1]
+
+            rotations = R.from_quat(ee_quat_putdown.squeeze().cpu().numpy()).as_matrix()
+            franka_L = np.diag([1, -1, 1])
+            franka_R = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
+            rotations = franka_L @ rotations.T @ franka_R
+
+            R_180 = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
+            rotations = R_180 @ rotations @ R_180.T
+            rotations = franka_L @ rotations.T @ franka_R
+            ee_quat_putdown = (
+                torch.tensor(R.from_matrix(rotations).as_quat())
+                .to(ee_quat_putdown.device)
+                .unsqueeze(0)
+                .unsqueeze(0)
+            )
+            ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(
+                tcp_pos_putdown, ee_quat_putdown
+            )
+
+            joint_pos.append(
+                self.plan_pose_single(
+                    cu_js, ee_pos_putdown[0], ee_quat_putdown[0], open_gripper=False
+                )
+            )
+
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
         # Open Gripper
