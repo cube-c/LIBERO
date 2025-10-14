@@ -168,9 +168,6 @@ class MotionController:
         self.traj_optimizer = traj_optimizer
         self.images = []
 
-    def dummy_action(self, step: int):
-        return torch.zeros((step, 9))
-
     def get_joint_state(self):
         """Get the current joint position."""
         joint_pos = get_joint_state_from_obs(self.obs)
@@ -192,7 +189,13 @@ class MotionController:
         log.info(f"Current robot joint state: {js}")
         return js
 
-    def act(self, actions, save_obs: bool = True):
+    def dummy_act(self, step: int):
+        for _ in range(step):
+            obs, _, done, _ = self.env.step([0.0] * 8)
+            self.obs = obs
+            self.done = self.done or done
+
+    def act(self, actions):
         for action in actions:
             # log.info(f"Action: {action}")
             obs, _, done, _ = step_to_target_pos(
@@ -200,8 +203,7 @@ class MotionController:
             )
             self.done = self.done or done
             self.obs = obs
-            if save_obs:
-                self.images.append(obs["agentview_image"][::-1])
+            self.images.append(obs["agentview_image"][::-1])
 
     def get_point_cloud(self):
         # point cloud from agentview
@@ -229,7 +231,7 @@ class MotionController:
 
     def simulate_from_prompt(self, prompt: str):
         """Simulate the robot from prompt."""
-        self.act(self.dummy_action(10), save_obs=True)
+        self.dummy_act(10)
 
         img = Image.fromarray(self.obs["agentview_image"][::-1])
         pcd, depth, cam_intr_mat, cam_extr_mat = self.get_point_cloud()
@@ -246,7 +248,7 @@ class MotionController:
         actions = self.traj_optimizer.plan_trajectory(
             js, img, depth, pcd, prompt, cam_intr_mat, cam_extr_mat
         )
-        self.act(actions, save_obs=True)
+        self.act(actions)
         return self.obs, self.done
 
     def make_video(self, task_id=None, eval_index=None):
@@ -288,7 +290,7 @@ if __name__ == "__main__":
     traj_optimizer = TrajOptimizer()
 
     for task_id in range(benchmark_instance.get_num_tasks()):
-        if task_id == 2:
+        if task_id != 2:
             continue
         task = benchmark_instance.get_task(task_id)
         init_states = benchmark_instance.get_task_init_states(task_id)

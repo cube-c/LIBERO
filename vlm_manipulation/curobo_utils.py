@@ -18,7 +18,7 @@ log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
 import json
 import re
-from typing import Any, List
+from typing import Any, List, Optional
 
 import open3d as o3d
 import rootutils
@@ -270,23 +270,24 @@ class GraspPoseFinder:
         # TODO: check if this is necessary
         self.transform_matrix = np.diag([1, -1, -1])
 
-    def find(self, pcd: o3d.geometry.PointCloud):
+    def find(
+        self, pcd: o3d.geometry.PointCloud, focus_point: Optional[np.ndarray] = None
+    ):
         points = np.array(pcd.points)
         colors = np.array(pcd.colors)
-        # log.info(f"Point cloud shape: {points.shape}")
-        # log.info(
-        # f"Point cloud bounds: X[{points[:, 0].min():.3f}, {points[:, 0].max():.3f}], "
-        # f"Y[{points[:, 1].min():.3f}, {points[:, 1].max():.3f}], "
-        # f"Z[{points[:, 2].min():.3f}, {points[:, 2].max():.3f}]"
-        # )
 
         point_mask = np.logical_and(
-            points[:, 2] <= 0.2,
+            points[:, 2] < 0.2,
             np.logical_and(
-                points[:, 0] <= 1.0,
-                np.logical_and(points[:, 1] >= -1.0, points[:, 1] <= 1.0),
+                np.abs(points[:, 0] - 0.5) < 0.5,
+                np.abs(points[:, 1]) < 0.5,
             ),
         )
+
+        if focus_point is not None:
+            point_mask = np.logical_and(
+                point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.3
+            )
 
         # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
         points_masked = points[point_mask]
@@ -298,7 +299,7 @@ class GraspPoseFinder:
         )
         pcd.points = o3d.utility.Vector3dVector(points_masked)
         pcd.colors = o3d.utility.Vector3dVector(colors_masked)
-        # o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
+        o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
 
         grasps = self.gsnet.inference(np.array(pcd.points) @ self.transform_matrix)
         grasps.translations = grasps.translations @ self.transform_matrix.T
@@ -683,7 +684,7 @@ class TrajOptimizer:
 
         # TODO: filter out pcd that are not close from start point, before getting the grasp candidates
         N = 8
-        gg = self.grasp_finder.find(pcd)
+        gg = self.grasp_finder.find(pcd, focus_point=start_point_3d)
         gg = self._sorted_grasp_by_distance(start_point_3d, gg)
 
         # TODO: fix visualization bug
@@ -693,7 +694,6 @@ class TrajOptimizer:
         # image_only=True,
         # filename=f"outputs/gsnet.png",
         # )
-        # log.info(f"Grasp candidates: {gg[:N]}")
         ee_pos_pickup, ee_quat_pickup = self._grasp_to_franka(gg[:N])
         log.info(f"ee_pos_pickup: {ee_pos_pickup}, ee_quat_pickup: {ee_quat_pickup}")
 
