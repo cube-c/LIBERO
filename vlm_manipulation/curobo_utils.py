@@ -94,9 +94,13 @@ class VLMPointExtractor:
 
     def extract_sequence(self, img, prompt):
         # example prompt from LIBERO
-        prompt_suffix = 'Report action sequence of the robot in JSON format like this: \
-        [{"pick_up": [x, y], "put_down": [x, y]}, ...]'
-        prompt = prompt + "\n" + prompt_suffix
+        prompt_suffix = '''
+            Plan the picking up and placing down actions with points. \
+            Report the point coordinates in JSON array like this: \
+            [{"pick_up": [x, y], "place_down": [x, y]}, ...] \
+            Use the object center for pick_up; use the intended contact point for place_down.
+        '''
+        prompt = "Instruction: " + prompt + "\n" + prompt_suffix
         output_text = self.inference(img, prompt)
         log.info(f"Qwen2.5-VL action sequence: {output_text}")
         seq = self._extract_sequence(output_text)
@@ -106,7 +110,7 @@ class VLMPointExtractor:
         def _is_pick_put_obj(obj: Any) -> bool:
             if not isinstance(obj, dict):
                 return False
-            if not ("pick_up" in obj and "put_down" in obj):
+            if not ("pick_up" in obj and "place_down" in obj):
                 return False
 
             def ok(v):
@@ -116,7 +120,7 @@ class VLMPointExtractor:
                     and all(isinstance(n, (int, float)) for n in v)
                 )
 
-            return ok(obj["pick_up"]) and ok(obj["put_down"])
+            return ok(obj["pick_up"]) and ok(obj["place_down"])
 
         def _normalize_pair(v):  # ints are usually what you want for pixels
             x, y = v
@@ -128,7 +132,7 @@ class VLMPointExtractor:
                 out.append(
                     {
                         "pick_up": _normalize_pair(obj["pick_up"]),
-                        "put_down": _normalize_pair(obj["put_down"]),
+                        "place_down": _normalize_pair(obj["place_down"]),
                     }
                 )
             elif isinstance(obj, list):
@@ -137,7 +141,7 @@ class VLMPointExtractor:
                         out.append(
                             {
                                 "pick_up": _normalize_pair(it["pick_up"]),
-                                "put_down": _normalize_pair(it["put_down"]),
+                                "place_down": _normalize_pair(it["place_down"]),
                             }
                         )
             return out
@@ -287,7 +291,7 @@ class GraspPoseFinder:
 
         if focus_point is not None:
             point_mask = np.logical_and(
-                point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.3
+                point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.25
             )
 
         # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
@@ -460,13 +464,18 @@ class TrajOptimizer:
         quats = R.from_matrix(rotations).as_quat()
         log.info(f"Quats: {quats}")
         rotation_transform_for_franka = torch.tensor(
-            [[
-                [0.0, 0.0, 1.0],
-                [0.0, -1.0, 0.0],
-                [1.0, 0.0, 0.0],
-            ]],
+            [
+                [
+                    [0.0, 0.0, 1.0],
+                    [0.0, -1.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                ]
+            ],
         )
-        rotations = torch.tensor(rotations, dtype=torch.float32).transpose(2, 1) @ rotation_transform_for_franka
+        rotations = (
+            torch.tensor(rotations, dtype=torch.float32).transpose(2, 1)
+            @ rotation_transform_for_franka
+        )
 
         quats = R.from_matrix(rotations).as_quat()
 
@@ -693,7 +702,7 @@ class TrajOptimizer:
         # TODO: support multiple steps in a sequence
         # Get 3D points from pixel coordinates
         start_point = seq[0]["pick_up"]
-        end_point = seq[0]["put_down"]
+        end_point = seq[0]["place_down"]
 
         log.info(f"3d point of pixel: {start_point} / {end_point}")
         start_point_3d = self._get_3d_point_from_pixel(
@@ -796,12 +805,11 @@ class TrajOptimizer:
         if joint_pos[-1] is None:
             joint_pos = joint_pos[:-1]
 
-            rotations = R.from_quat(ee_quat_putdown.squeeze().cpu().numpy()).as_matrix()
-
-            R_180 = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
-            rotations = R_180 @ rotations @ R_180.T
+            rotations = matrix_from_quat(ee_quat_putdown).squeeze()
+            R_180 = torch.tensor([[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]]).to(rotations.device)
+            rotations = R_180 @ rotations
             ee_quat_putdown = (
-                torch.tensor(R.from_matrix(rotations).as_quat())
+                torch.tensor(quat_from_matrix(rotations))
                 .to(ee_quat_putdown.device)
                 .to(torch.float32)
                 .unsqueeze(0)
@@ -861,3 +869,10 @@ def matrix_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
         -1,
     )
     return o.reshape(quaternions.shape[:-1] + (3, 3))
+
+def quat_from_matrix(matrix: torch.Tensor) -> torch.Tensor:
+    # let matrix is a nx3x3 matrix
+    q_xyzw = torch.tensor(R.from_matrix(matrix.detach().cpu().numpy()).as_quat()).to(matrix.device).to(matrix.dtype)
+    x, y, z, w = torch.unbind(q_xyzw, -1)
+    q_wxyz = torch.stack([w, x, y, z], -1)
+    return q_wxyz
