@@ -458,23 +458,33 @@ class TrajOptimizer:
         positions = grasps.translations.copy()
         rotations = grasps.rotation_matrices.copy()
         quats = R.from_matrix(rotations).as_quat()
-
-        # franka transform
-        franka_L = np.diag([1, -1, 1])
-        franka_R = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
-        rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
-        # rotations = rotations.transpose(0, 2, 1)
+        log.info(f"Quats: {quats}")
+        rotation_transform_for_franka = torch.tensor(
+            [[
+                [0.0, 0.0, 1.0],
+                [0.0, -1.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ]],
+        )
+        rotations = torch.tensor(rotations, dtype=torch.float32).transpose(2, 1) @ rotation_transform_for_franka
 
         quats = R.from_matrix(rotations).as_quat()
 
-        # convert ee pose from tcp pose
         log.info(f"Positions: {positions}")
         log.info(f"Quats: {quats}")
+
+        # franka transform
+        # franka_L = np.diag([1, -1, 1])
+        # franka_R = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
+        # rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
+        # rotations = rotations.transpose(0, 2, 1)
+
+        # convert ee pose from tcp pose
         positions, quats = self._ee_pose_from_tcp_pose(
             tcp_pos=torch.tensor(positions, dtype=torch.float32),
             tcp_quat=torch.tensor(quats, dtype=torch.float32),
         )
-        grasp_offset = -torch.cat(
+        grasp_offset = torch.cat(
             [
                 torch.zeros(len(grasps.depths), 2),
                 torch.tensor(grasps.depths, dtype=torch.float32).unsqueeze(1),
@@ -727,7 +737,20 @@ class TrajOptimizer:
         # Pick up
         ee_pos_pickup[:, :, 2] += 0.2
         self.motion_gen.toggle_link_collision(
-            ["panda_hand", "panda_leftfinger", "panda_rightfinger"], False
+            [
+                "panda_link0",
+                "panda_link1",
+                "panda_link2",
+                "panda_link3",
+                "panda_link4",
+                "panda_link5",
+                "panda_link6",
+                "panda_link7",
+                "panda_hand",
+                "panda_leftfinger",
+                "panda_rightfinger",
+            ],
+            False,
         )
         joint_pos.append(
             self.plan_pose_single(
@@ -735,7 +758,20 @@ class TrajOptimizer:
             )
         )
         self.motion_gen.toggle_link_collision(
-            ["panda_hand", "panda_leftfinger", "panda_rightfinger"], True
+            [
+                "panda_link0",
+                "panda_link1",
+                "panda_link2",
+                "panda_link3",
+                "panda_link4",
+                "panda_link5",
+                "panda_link6",
+                "panda_link7",
+                "panda_hand",
+                "panda_leftfinger",
+                "panda_rightfinger",
+            ],
+            False,
         )
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
@@ -761,16 +797,13 @@ class TrajOptimizer:
             joint_pos = joint_pos[:-1]
 
             rotations = R.from_quat(ee_quat_putdown.squeeze().cpu().numpy()).as_matrix()
-            franka_L = np.diag([1, -1, 1])
-            franka_R = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
-            rotations = franka_L @ rotations.T @ franka_R
 
             R_180 = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
             rotations = R_180 @ rotations @ R_180.T
-            rotations = franka_L @ rotations.T @ franka_R
             ee_quat_putdown = (
                 torch.tensor(R.from_matrix(rotations).as_quat())
                 .to(ee_quat_putdown.device)
+                .to(torch.float32)
                 .unsqueeze(0)
                 .unsqueeze(0)
             )

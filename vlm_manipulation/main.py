@@ -268,19 +268,28 @@ def modify_sideview_camera(env):
     camera_id = sim.model.camera_name2id("sideview")
 
     # Update camera position
-    sim.model.cam_pos[camera_id] = np.array(
-        [-0.05651774593317116, -1.2761224129427358, 0.4879572214102434]
-    )
+    # sim.model.cam_pos[camera_id] = np.array(
+    # [-0.05651774593317116, -1.2761224129427358, 0.4879572214102434]
+    # )
+    # sim.model.cam_quat[camera_id] = np.array(
+    # [
+    # 0.009905065491771751,
+    # -0.006877963156909582,
+    # -0.5912228352893879,
+    # 0.806418094001364,
+    # ]
+    # )
+
+    # manually tuned camera position and rotation
+    sim.model.cam_pos[camera_id] = np.array([0.141838 - 0.6, -0.988357, 0.52037])
     sim.model.cam_quat[camera_id] = np.array(
         [
-            0.009905065491771751,
-            -0.006877963156909582,
-            -0.5912228352893879,
-            0.806418094001364,
+            0.819536,
+            0.507731,
+            -0.139905,
+            -0.225823,
         ]
     )
-
-    # Forward the simulation to apply changes
     sim.forward()
 
 
@@ -290,7 +299,7 @@ if __name__ == "__main__":
     traj_optimizer = TrajOptimizer()
 
     for task_id in range(benchmark_instance.get_num_tasks()):
-        if task_id != 0:
+        if task_id == 0:
             continue
         task = benchmark_instance.get_task(task_id)
         init_states = benchmark_instance.get_task_init_states(task_id)
@@ -317,8 +326,6 @@ if __name__ == "__main__":
         total = 0
 
         for eval_index in range(min(len(init_states), 10)):
-            if eval_index != 0:
-                continue
             #     Fix random seeds for reproducibility
             env.seed(0)
             env.reset()
