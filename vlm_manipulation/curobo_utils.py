@@ -94,12 +94,14 @@ class VLMPointExtractor:
 
     def extract_sequence(self, img, prompt):
         # example prompt from LIBERO
-        prompt_suffix = '''
+        prompt_suffix = """
             Plan the picking up and placing down actions with points. \
             Report the point coordinates in JSON array like this: \
             [{"pick_up": [x, y], "place_down": [x, y]}, ...] \
             Use the object center for pick_up; use the intended contact point for place_down.
-        '''
+            For the place_down with prepositions like “in/into/inside”, it must be \
+            on interior surface of the container, NOT the rim, NOT the outer wall, NOT the exterior top.
+        """
         prompt = "Instruction: " + prompt + "\n" + prompt_suffix
         output_text = self.inference(img, prompt)
         log.info(f"Qwen2.5-VL action sequence: {output_text}")
@@ -291,7 +293,7 @@ class GraspPoseFinder:
 
         if focus_point is not None:
             point_mask = np.logical_and(
-                point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.25
+                point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.2
             )
 
         # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
@@ -806,7 +808,9 @@ class TrajOptimizer:
             joint_pos = joint_pos[:-1]
 
             rotations = matrix_from_quat(ee_quat_putdown).squeeze()
-            R_180 = torch.tensor([[-1., 0., 0.], [0., -1., 0.], [0., 0., 1.]]).to(rotations.device)
+            R_180 = torch.tensor(
+                [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]]
+            ).to(rotations.device)
             rotations = R_180 @ rotations
             ee_quat_putdown = (
                 torch.tensor(quat_from_matrix(rotations))
@@ -870,9 +874,14 @@ def matrix_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
     )
     return o.reshape(quaternions.shape[:-1] + (3, 3))
 
+
 def quat_from_matrix(matrix: torch.Tensor) -> torch.Tensor:
     # let matrix is a nx3x3 matrix
-    q_xyzw = torch.tensor(R.from_matrix(matrix.detach().cpu().numpy()).as_quat()).to(matrix.device).to(matrix.dtype)
+    q_xyzw = (
+        torch.tensor(R.from_matrix(matrix.detach().cpu().numpy()).as_quat())
+        .to(matrix.device)
+        .to(matrix.dtype)
+    )
     x, y, z, w = torch.unbind(q_xyzw, -1)
     q_wxyz = torch.stack([w, x, y, z], -1)
     return q_wxyz

@@ -28,7 +28,7 @@ class GSNet:
             "third_party/gsnet/assets/minkuresunet_realsense_tune_epoch20.tar"
         )
         self.seed_feat_dim = 512
-        self.num_point = 15000
+        self.num_point = 20000  # 15000
         self.batch_size = 1
         self.voxel_size = 0.005
         self.collision_thresh = 0.01
