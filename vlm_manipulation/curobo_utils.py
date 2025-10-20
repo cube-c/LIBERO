@@ -43,6 +43,9 @@ from curobo.wrap.reacher.motion_gen import (
 )
 from vlm_manipulation.gsnet_utils import GSNet
 
+from third_party.sam2.sam2.sam2_image_predictor import SAM2ImagePredictor
+from third_party.sam2.sam2.build_sam import build_sam2
+
 
 class VLMPointExtractor:
     def __init__(self, ckpt_path="Qwen/Qwen2.5-VL-7B-Instruct"):
@@ -272,13 +275,36 @@ class VLMPointExtractor:
 class GraspPoseFinder:
     def __init__(self):
         self.gsnet = GSNet()
+        self.checkpoint = "./third_party/sam2/checkpoints/sam2.1_hiera_large.pt"
+        self.model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+        self.mask_predictor = SAM2ImagePredictor(
+            build_sam2(self.model_cfg, self.checkpoint)
+        )
 
         # for axis conversion between GSNet and isaaclab
         # TODO: check if this is necessary
         self.transform_matrix = np.diag([1, -1, -1])
 
+    def _get_segmentation_mask(self, img: Image.Image, point_coords: np.ndarray):
+        self.mask_predictor.set_image(img)
+        log.info(f"point_coord : {point_coords}")
+        masks, _, _ = self.mask_predictor.predict(
+            point_coords=np.expand_dims(point_coords, axis=0),
+            point_labels=np.array([1]),
+        )
+        # masks is a 3D tensor, (n_masks, height, width)
+        # we need to convert it to 2D tensor, (height, width)
+        # we use the second mask, which is the most confident mask empirically
+        return masks[1]
+
     def find(
-        self, pcd: o3d.geometry.PointCloud, focus_point: Optional[np.ndarray] = None
+        self,
+        pcd: o3d.geometry.PointCloud,
+        img: Image.Image,
+        focus_point: np.ndarray,
+        focus_point_2d: np.ndarray,
+        camera_intr_mat: np.ndarray,
+        camera_extr_mat: np.ndarray,
     ):
         points = np.array(pcd.points)
         colors = np.array(pcd.colors)
@@ -291,10 +317,34 @@ class GraspPoseFinder:
             ),
         )
 
-        if focus_point is not None:
-            point_mask = np.logical_and(
-                point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.2
-            )
+        # first, mask with focus point
+        point_mask = np.logical_and(
+            point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.3
+        )
+        # second, mask with segmentation mask
+        segmentation_mask = self._get_segmentation_mask(
+            img, point_coords=focus_point_2d
+        )
+
+        # transform points to 2d viewpoint coordinate
+        log.info(f"camera_extr_mat: {camera_extr_mat}")
+        log.info(f"camera_intr_mat: {camera_intr_mat}")
+        points_2d = (
+            camera_intr_mat
+            @ camera_extr_mat[:3, :]
+            @ np.concatenate([points, np.ones((points.shape[0], 1))], axis=1).T
+        ).T
+        points_2d = points_2d[:, :2] / points_2d[:, 2:3]
+        # out of bounds check
+        points_x = np.clip(
+            points_2d[:, 0], 0, segmentation_mask.shape[1] - 1
+        ).astype(int)
+        points_y = np.clip(
+            points_2d[:, 1], 0, segmentation_mask.shape[0] - 1
+        ).astype(int)
+        segmentation_mask = segmentation_mask[points_y, points_x]
+
+        point_mask = np.logical_and(point_mask, segmentation_mask)
 
         # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
         points_masked = points[point_mask]
@@ -726,7 +776,14 @@ class TrajOptimizer:
 
         # TODO: filter out pcd that are not close from start point, before getting the grasp candidates
         N = 8
-        gg = self.grasp_finder.find(pcd, focus_point=start_point_3d)
+        gg = self.grasp_finder.find(
+            pcd,
+            img,
+            focus_point=start_point_3d,
+            focus_point_2d=start_point,
+            camera_intr_mat=camera_intr_mat,
+            camera_extr_mat=camera_extr_mat,
+        )
         gg = self._sorted_grasp_by_distance(start_point_3d, gg)
 
         # TODO: fix visualization bug
