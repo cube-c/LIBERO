@@ -349,6 +349,11 @@ class GraspPoseFinder:
         # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
         points_masked = points[point_mask]
         colors_masked = colors[point_mask]
+
+        # move points to origin
+        # points_masked_mean = points_masked.mean(axis=0)
+        # points_masked -= points_masked_mean  
+
         log.info(
             f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
             f"Y[{points_masked[:, 1].min():.3f}, {points_masked[:, 1].max():.3f}], "
@@ -363,9 +368,10 @@ class GraspPoseFinder:
         grasps.rotation_matrices = (
             self.transform_matrix @ grasps.rotation_matrices @ self.transform_matrix.T
         )
+        # grasps.translations += points_masked_mean
 
         # Filter out grasps that has width larger than 0.08 (franka finger width)
-        grasps = grasps[grasps.widths <= 0.08]
+        # grasps = grasps[grasps.widths <= 0.08]
 
         # log best grasp candidate
         log.info(f"Total grasp candidates: {len(grasps)}")
