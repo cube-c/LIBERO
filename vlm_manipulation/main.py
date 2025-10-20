@@ -279,10 +279,11 @@ def modify_sideview_camera(env):
     )
 
     camera_id = sim.model.camera_name2id("agentview")
-    sim.model.cam_pos[camera_id] = np.array([0.45, 0., 0.75])
+    sim.model.cam_pos[camera_id] = np.array([0.45, 0.0, 0.75])
     sim.model.cam_quat[camera_id] = np.array([0.683013, 0.183013, 0.183013, 0.683013])
 
     sim.forward()
+
 
 if __name__ == "__main__":
     benchmark_dict = benchmark.get_benchmark_dict()
