@@ -3,6 +3,7 @@ from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 import open3d as o3d
 import imageio
+import time
 from PIL import Image
 
 import numpy as np
@@ -230,13 +231,20 @@ class MotionController:
         return pcd, robot_position, robot_rotation_matrix
 
     def simulate_from_prompt(self, prompt: str):
+        start_time = time.time()
+
         """Simulate the robot from prompt."""
         self.dummy_act(10)
+
+        log.error(f"[Main] Time taken to dummy act: {time.time() - start_time}")
 
         img = Image.fromarray(self.obs["agentview_image"][::-1])
         pcd, depth, cam_intr_mat, cam_extr_mat = self.get_point_cloud()
         pcd, robot_position, robot_rotation_matrix = self.pcd_to_robot_center(pcd)
         # o3d.io.write_point_cloud("outputs/merged.ply", pcd)
+
+        end_time = time.time()
+        log.error(f"[Main] Time taken to get point cloud: {end_time - start_time}")
 
         # transform camera extrinsic matrix with respect to robot center and rotation matrix
         T_robot = np.eye(4, dtype=np.float64)
@@ -248,7 +256,15 @@ class MotionController:
         actions = self.traj_optimizer.plan_trajectory(
             js, img, depth, pcd, prompt, cam_intr_mat, cam_extr_mat
         )
+
+        end_time = time.time()
+        log.error(f"[Main] Time taken to plan trajectory: {end_time - start_time}")
+
         self.act(actions)
+
+        end_time = time.time()
+        log.error(f"[Main] Time taken to act: {end_time - start_time}")
+
         return self.obs, self.done
 
     def make_video(self, task_id=None, eval_index=None):

@@ -20,6 +20,7 @@ log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 import json
 import re
 from typing import Any, List, Optional
+import time
 
 import open3d as o3d
 import rootutils
@@ -336,12 +337,12 @@ class GraspPoseFinder:
         ).T
         points_2d = points_2d[:, :2] / points_2d[:, 2:3]
         # out of bounds check
-        points_x = np.clip(
-            points_2d[:, 0], 0, segmentation_mask.shape[1] - 1
-        ).astype(int)
-        points_y = np.clip(
-            points_2d[:, 1], 0, segmentation_mask.shape[0] - 1
-        ).astype(int)
+        points_x = np.clip(points_2d[:, 0], 0, segmentation_mask.shape[1] - 1).astype(
+            int
+        )
+        points_y = np.clip(points_2d[:, 1], 0, segmentation_mask.shape[0] - 1).astype(
+            int
+        )
         segmentation_mask = segmentation_mask[points_y, points_x]
 
         point_mask = np.logical_and(point_mask, segmentation_mask)
@@ -352,7 +353,7 @@ class GraspPoseFinder:
 
         # move points to origin
         # points_masked_mean = points_masked.mean(axis=0)
-        # points_masked -= points_masked_mean  
+        # points_masked -= points_masked_mean
 
         log.info(
             f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
@@ -361,7 +362,7 @@ class GraspPoseFinder:
         )
         pcd.points = o3d.utility.Vector3dVector(points_masked)
         pcd.colors = o3d.utility.Vector3dVector(colors_masked)
-        o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
+        # o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
 
         grasps = self.gsnet.inference(np.array(pcd.points) @ self.transform_matrix)
         grasps.translations = grasps.translations @ self.transform_matrix.T
@@ -427,6 +428,9 @@ class TrajOptimizer:
         self.robot_tcp_rel_pos = [0.0, 0.0, 0.10312]
         self.curobo_n_dof = 7
         self.ee_n_dof = 2
+
+        self.motion_gen = None
+        self.motion_gen_count = 0
 
         tensor_args = TensorDeviceType()
         self.config_file = load_yaml(join_path(get_robot_path(), "franka.yml"))[
@@ -580,23 +584,37 @@ class TrajOptimizer:
         return ee_pos, tcp_quat
 
     def _set_motion_gen_with_pcd(self, pcd):
+        start_time = time.time()
         world_cfg = WorldConfig(
             cuboid=[
                 Cuboid(
                     name="ground",
-                    pose=[0.0, 0.0, -0.4, 1.0, 0.0, 0.0, 0.0],
-                    dims=[10.0, 10.0, 0.8],
+                    pose=[0.0, 0.0, -0.2, 1.0, 0.0, 0.0, 0.0],
+                    dims=[3.0, 3.0, 0.4],
                 ),
             ],
             # TODO: is there any better method (using nvblox?)
             mesh=[
                 Mesh.from_pointcloud(
-                    np.asarray(pcd.points),
+                    name="pcd mesh" + str(self.motion_gen_count),
+                    pointcloud=np.asarray(pcd.points),
                     pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],
                     pitch=0.005,
                 )
             ],
         )
+        self.motion_gen_count += 1
+        end_time = time.time()
+        log.error(f"[MotionGen] Time taken to process pcd: {end_time - start_time}")
+
+        if self.motion_gen is not None:
+            self.motion_gen.update_world(world_cfg)
+            end_time = time.time()
+            log.error(
+                f"[MotionGen] Time taken to update world: {end_time - start_time}"
+            )
+            return
+
         # world_cfg.save_world_as_mesh("outputs/world.ply")
         motion_gen_config = MotionGenConfig.load_from_robot_config(
             self.robot_config,
@@ -606,8 +624,19 @@ class TrajOptimizer:
             self_collision_opt=True,
             use_cuda_graph=False,  # True
         )
+        end_time = time.time()
+        log.error(
+            f"[MotionGen] Time taken to load world config: {end_time - start_time}"
+        )
         motion_gen = MotionGen(motion_gen_config)
+        end_time = time.time()
+        log.error(f"[MotionGen] Time taken to load motion gen: {end_time - start_time}")
         motion_gen.warmup()
+
+        end_time = time.time()
+        log.error(
+            f"[MotionGen] Time taken to warmup motion gen: {end_time - start_time}"
+        )
 
         self.motion_gen = motion_gen
 
@@ -754,7 +783,12 @@ class TrajOptimizer:
     def plan_trajectory(
         self, js: JointState, img, depth, pcd, prompt, camera_intr_mat, camera_extr_mat
     ):
+        start_time = time.time()
         seq = self.point_extractor.extract_sequence(img, prompt)
+        end_time = time.time()
+        log.error(
+            f"[TrajOptimizer] Time taken to extract sequence: {end_time - start_time}"
+        )
         assert isinstance(seq, list) and len(seq) > 0, "No valid action sequence found"
 
         # TODO: support multiple steps in a sequence
@@ -770,15 +804,29 @@ class TrajOptimizer:
             end_point, depth, camera_intr_mat, camera_extr_mat
         )
 
+        end_time = time.time()
+        log.error(
+            f"[TrajOptimizer] Time taken to get 3d points: {end_time - start_time}"
+        )
+
         # TODO: add debug flag for visualization
         # Draw image
-        draw = ImageDraw.Draw(img)
-        draw.circle(start_point, 4, fill="red")
-        draw.circle(end_point, 4, fill="blue")
-        img.save(f"outputs/image.png")
+        # draw = ImageDraw.Draw(img)
+        # draw.circle(start_point, 4, fill="red")
+        # draw.circle(end_point, 4, fill="blue")
+        # img.save(f"outputs/image.png")
 
         pcd = self._filter_out_robot_from_pcd(pcd)
+        end_time = time.time()
+        log.error(
+            f"[TrajOptimizer] Time taken to filter out robot from pcd: {end_time - start_time}"
+        )
         self._set_motion_gen_with_pcd(pcd)
+
+        end_time = time.time()
+        log.error(
+            f"[TrajOptimizer] Time taken to set motion gen with pcd: {end_time - start_time}"
+        )
 
         # TODO: filter out pcd that are not close from start point, before getting the grasp candidates
         N = 8
@@ -791,6 +839,9 @@ class TrajOptimizer:
             camera_extr_mat=camera_extr_mat,
         )
         gg = self._sorted_grasp_by_distance(start_point_3d, gg)
+
+        end_time = time.time()
+        log.error(f"[TrajOptimizer] Time taken to find grasp: {end_time - start_time}")
 
         # TODO: fix visualization bug
         # self.grasp_finder.visualize(
@@ -898,6 +949,10 @@ class TrajOptimizer:
         joint_pos.append(self.plan_gripper(cu_js, open_gripper=True, step=40))
 
         # TODO: attach object to robot
+        end_time = time.time()
+        log.error(
+            f"[TrajOptimizer] Time taken to plan trajectory: {end_time - start_time}"
+        )
 
         # Concat All Plans
         joint_pos = torch.cat(joint_pos, dim=0)
