@@ -26,6 +26,8 @@ log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 H, W = 1024, 1024
 camera_names = ["agentview", "sideview"]
 
+task_type = "libero_object"
+
 
 def depth_buffer_to_depth_image(depth, zfar, znear):
     return znear / (1.0 - depth * (1.0 - znear / zfar))
@@ -282,29 +284,32 @@ def modify_sideview_camera(env):
     """Modify the sideview camera position at runtime"""
     sim = env.env.sim
 
-    # manually tuned camera position and rotation (for libero_10)
+    # manually tuned camera position and rotation (for libero_object)
 
-    # camera_id = sim.model.camera_name2id("sideview")
-    # sim.model.cam_pos[camera_id] = np.array([0.141838 - 0.6, -0.988357, 0.52037])
-    # sim.model.cam_quat[camera_id] = np.array(
-    # [
-    # 0.819536,
-    # 0.507731,
-    # -0.139905,
-    # -0.225823,
-    # ]
-    # )
+    if task_type == "libero_object":
+        camera_id = sim.model.camera_name2id("sideview")
+        sim.model.cam_pos[camera_id] = np.array([0.141838 - 0.6, -0.988357, 0.52037])
+        sim.model.cam_quat[camera_id] = np.array(
+            [
+                0.819536,
+                0.507731,
+                -0.139905,
+                -0.225823,
+            ]
+        )
 
-    # camera_id = sim.model.camera_name2id("agentview")
-    # sim.model.cam_pos[camera_id] = np.array([0.45, 0.0, 0.75])
-    # sim.model.cam_quat[camera_id] = np.array([0.683013, 0.183013, 0.183013, 0.683013])
+        camera_id = sim.model.camera_name2id("agentview")
+        sim.model.cam_pos[camera_id] = np.array([0.45, 0.0, 0.75])
+        sim.model.cam_quat[camera_id] = np.array(
+            [0.683013, 0.183013, 0.183013, 0.683013]
+        )
 
     sim.forward()
 
 
 if __name__ == "__main__":
     benchmark_dict = benchmark.get_benchmark_dict()
-    benchmark_instance = benchmark_dict["libero_spatial"]()
+    benchmark_instance = benchmark_dict[task_type]()
     traj_optimizer = TrajOptimizer()
 
     for task_id in range(benchmark_instance.get_num_tasks()):
