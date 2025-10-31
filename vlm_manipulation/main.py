@@ -281,29 +281,30 @@ class MotionController:
 def modify_sideview_camera(env):
     """Modify the sideview camera position at runtime"""
     sim = env.env.sim
-    camera_id = sim.model.camera_name2id("sideview")
 
-    # manually tuned camera position and rotation
-    sim.model.cam_pos[camera_id] = np.array([0.141838 - 0.6, -0.988357, 0.52037])
-    sim.model.cam_quat[camera_id] = np.array(
-        [
-            0.819536,
-            0.507731,
-            -0.139905,
-            -0.225823,
-        ]
-    )
+    # manually tuned camera position and rotation (for libero_10)
 
-    camera_id = sim.model.camera_name2id("agentview")
-    sim.model.cam_pos[camera_id] = np.array([0.45, 0.0, 0.75])
-    sim.model.cam_quat[camera_id] = np.array([0.683013, 0.183013, 0.183013, 0.683013])
+    # camera_id = sim.model.camera_name2id("sideview")
+    # sim.model.cam_pos[camera_id] = np.array([0.141838 - 0.6, -0.988357, 0.52037])
+    # sim.model.cam_quat[camera_id] = np.array(
+    # [
+    # 0.819536,
+    # 0.507731,
+    # -0.139905,
+    # -0.225823,
+    # ]
+    # )
+
+    # camera_id = sim.model.camera_name2id("agentview")
+    # sim.model.cam_pos[camera_id] = np.array([0.45, 0.0, 0.75])
+    # sim.model.cam_quat[camera_id] = np.array([0.683013, 0.183013, 0.183013, 0.683013])
 
     sim.forward()
 
 
 if __name__ == "__main__":
     benchmark_dict = benchmark.get_benchmark_dict()
-    benchmark_instance = benchmark_dict["libero_object"]()
+    benchmark_instance = benchmark_dict["libero_spatial"]()
     traj_optimizer = TrajOptimizer()
 
     for task_id in range(benchmark_instance.get_num_tasks()):

@@ -322,7 +322,7 @@ class GraspPoseFinder:
         point_mask = np.logical_and(
             point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.3
         )
-        # second, mask with segmentation mask
+        # # second, mask with segmentation mask
         segmentation_mask = self._get_segmentation_mask(
             img, point_coords=focus_point_2d
         )
@@ -362,7 +362,7 @@ class GraspPoseFinder:
         )
         pcd.points = o3d.utility.Vector3dVector(points_masked)
         pcd.colors = o3d.utility.Vector3dVector(colors_masked)
-        # o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
+        o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
 
         grasps = self.gsnet.inference(np.array(pcd.points) @ self.transform_matrix)
         grasps.translations = grasps.translations @ self.transform_matrix.T
@@ -544,12 +544,6 @@ class TrajOptimizer:
         log.info(f"Positions: {positions}")
         log.info(f"Quats: {quats}")
 
-        # franka transform
-        # franka_L = np.diag([1, -1, 1])
-        # franka_R = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
-        # rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
-        # rotations = rotations.transpose(0, 2, 1)
-
         # convert ee pose from tcp pose
         positions, quats = self._ee_pose_from_tcp_pose(
             tcp_pos=torch.tensor(positions, dtype=torch.float32),
@@ -586,13 +580,13 @@ class TrajOptimizer:
     def _set_motion_gen_with_pcd(self, pcd):
         start_time = time.time()
         world_cfg = WorldConfig(
-            cuboid=[
-                Cuboid(
-                    name="ground",
-                    pose=[0.0, 0.0, -0.2, 1.0, 0.0, 0.0, 0.0],
-                    dims=[3.0, 3.0, 0.4],
-                ),
-            ],
+            # cuboid=[
+            # Cuboid(
+            # name="ground",
+            # pose=[0.0, 0.0, -0.2, 1.0, 0.0, 0.0, 0.0],
+            # dims=[3.0, 3.0, 0.4],
+            # ),
+            # ],
             # TODO: is there any better method (using nvblox?)
             mesh=[
                 Mesh.from_pointcloud(
@@ -603,6 +597,7 @@ class TrajOptimizer:
                 )
             ],
         )
+        world_cfg.save_world_as_mesh("outputs/world.ply")
         self.motion_gen_count += 1
         end_time = time.time()
         log.error(f"[MotionGen] Time taken to process pcd: {end_time - start_time}")
@@ -615,14 +610,13 @@ class TrajOptimizer:
             )
             return
 
-        # world_cfg.save_world_as_mesh("outputs/world.ply")
         motion_gen_config = MotionGenConfig.load_from_robot_config(
             self.robot_config,
             world_cfg,
             TensorDeviceType(),
             self_collision_check=True,
             self_collision_opt=True,
-            use_cuda_graph=False,  # True
+            use_cuda_graph=False,  # True,
         )
         end_time = time.time()
         log.error(
@@ -689,7 +683,7 @@ class TrajOptimizer:
         js: JointState,
         ee_pos_target: torch.Tensor,
         ee_quat_target: torch.Tensor,
-        depth: float = 0.05,  # TODO: use depth from grasp finder
+        depth: float = 0.03,  # TODO: use depth from grasp finder
     ):
         """Plan the grasp."""
         for i in range(ee_pos_target.shape[1]):
@@ -723,6 +717,12 @@ class TrajOptimizer:
             log.debug(f"Motion planning result:{result.success}")
             if result.success:
                 break
+            else:
+                log.debug(f"Motion planning result: {result.status}")
+
+        if not result.success:
+            log.debug("No successful grasp motion plan found.")
+            return None
 
         # index = result.goalset_index.item()
         index = i
@@ -811,10 +811,10 @@ class TrajOptimizer:
 
         # TODO: add debug flag for visualization
         # Draw image
-        # draw = ImageDraw.Draw(img)
-        # draw.circle(start_point, 4, fill="red")
-        # draw.circle(end_point, 4, fill="blue")
-        # img.save(f"outputs/image.png")
+        draw = ImageDraw.Draw(img)
+        draw.circle(start_point, 4, fill="red")
+        draw.circle(end_point, 4, fill="blue")
+        img.save(f"outputs/image.png")
 
         pcd = self._filter_out_robot_from_pcd(pcd)
         end_time = time.time()
@@ -828,8 +828,8 @@ class TrajOptimizer:
             f"[TrajOptimizer] Time taken to set motion gen with pcd: {end_time - start_time}"
         )
 
-        # TODO: filter out pcd that are not close from start point, before getting the grasp candidates
-        N = 8
+        # number of grasp candidates to check
+        N = 16
         gg = self.grasp_finder.find(
             pcd,
             img,
@@ -858,9 +858,14 @@ class TrajOptimizer:
         joint_pos.append(self.plan_grasp(js, ee_pos_pickup, ee_quat_pickup))
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
         ee_pos_pickup, ee_quat_pickup = self.do_fk(cu_js.position)
+        ee_from_point = ee_pos_pickup - torch.tensor(
+            start_point_3d, dtype=torch.float32
+        ).to("cuda:0").unsqueeze(0).unsqueeze(0)
 
         # Pick up
-        ee_pos_pickup[:, :, 2] += 0.2
+        ee_pos_pickup_lift = ee_pos_pickup.clone()
+        ee_quat_pickup_lift = ee_quat_pickup.clone()
+        ee_pos_pickup_lift[:, :, 2] += 0.2
         self.motion_gen.toggle_link_collision(
             [
                 "panda_link0",
@@ -879,7 +884,7 @@ class TrajOptimizer:
         )
         joint_pos.append(
             self.plan_pose_single(
-                cu_js, ee_pos_pickup, ee_quat_pickup, open_gripper=False
+                cu_js, ee_pos_pickup_lift, ee_quat_pickup_lift, open_gripper=False
             )
         )
         self.motion_gen.toggle_link_collision(
@@ -896,32 +901,33 @@ class TrajOptimizer:
                 "panda_leftfinger",
                 "panda_rightfinger",
             ],
-            False,
+            True,
         )
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
         # Put down
-        tcp_pos_putdown = (
+        # trial 1
+        ee_pos_putdown = (
             torch.tensor(end_point_3d, dtype=torch.float32)
             .to("cuda:0")
             .unsqueeze(0)
             .unsqueeze(0)
+            + ee_from_point
         )
+        ee_quat_putdown = ee_quat_pickup.clone()
+        ee_pos_putdown[:, :, 2] += 0.3
 
-        tcp_pos_putdown[:, :, 2] += 0.3  # lift up a bit
-        ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(
-            tcp_pos_putdown, ee_quat_pickup
-        )
-
+        # TODO: move linearly to the target pose
         joint_pos.append(
             self.plan_pose_single(
                 cu_js, ee_pos_putdown[0], ee_quat_putdown[0], open_gripper=False
             )
         )
         if joint_pos[-1] is None:
-            joint_pos = joint_pos[:-1]
+            # trial 2, rotate the target pose 180 degrees around z-axis and re-plan the trajectory
+            joint_pos = joint_pos[:-1]  # remove trial 1
 
-            rotations = matrix_from_quat(ee_quat_putdown).squeeze()
+            rotations = matrix_from_quat(ee_quat_pickup).squeeze()
             R_180 = torch.tensor(
                 [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]]
             ).to(rotations.device)
@@ -933,8 +939,13 @@ class TrajOptimizer:
                 .unsqueeze(0)
                 .unsqueeze(0)
             )
-            ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(
-                tcp_pos_putdown, ee_quat_putdown
+            ee_pos_putdown = (
+                torch.tensor(
+                    end_point_3d + rotations @ ee_from_point, dtype=torch.float32
+                )
+                .to("cuda:0")
+                .unsqueeze(0)
+                .unsqueeze(0)
             )
 
             joint_pos.append(
@@ -945,8 +956,9 @@ class TrajOptimizer:
 
         cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
-        # Open Gripper
-        joint_pos.append(self.plan_gripper(cu_js, open_gripper=True, step=40))
+        # Stay for a while and then open gripper
+        joint_pos.append(self.plan_gripper(cu_js, open_gripper=False, step=30))
+        joint_pos.append(self.plan_gripper(cu_js, open_gripper=True, step=50))
 
         # TODO: attach object to robot
         end_time = time.time()
