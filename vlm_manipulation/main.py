@@ -26,7 +26,7 @@ log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 H, W = 1024, 1024
 camera_names = ["agentview", "robot0_eye_in_hand"]
 
-task_type = "libero_object"
+task_type = "libero_spatial"
 
 
 def depth_buffer_to_depth_image(depth, zfar, znear):
@@ -87,22 +87,25 @@ def get_point_cloud_from_camera(img, depth, camera_name):
 
 
 def get_point_cloud_from_obs(obs, zfar, znear, camera_names=camera_names):
-    depth1 = depth_buffer_to_depth_image(obs[camera_names[0] + "_depth"], zfar, znear)[
-        ::-1
-    ]
-    depth2 = depth_buffer_to_depth_image(obs[camera_names[1] + "_depth"], zfar, znear)[
-        ::-1
-    ]
+    depth = [None, None]
+    intr = [None, None]
+    extr = [None, None]
+    depth[0] = depth_buffer_to_depth_image(
+        obs[camera_names[0] + "_depth"], zfar, znear
+    )[::-1]
+    depth[1] = depth_buffer_to_depth_image(
+        obs[camera_names[1] + "_depth"], zfar, znear
+    )[::-1]
     img1 = obs[camera_names[0] + "_image"][::-1]
     img2 = obs[camera_names[1] + "_image"][::-1]
-    pcd1, intr, extr = get_point_cloud_from_camera(
+    pcd1, intr[0], extr[0] = get_point_cloud_from_camera(
         img1,
-        depth1,
+        depth[0],
         camera_names[0],
     )
-    pcd2, _, _ = get_point_cloud_from_camera(
+    pcd2, intr[1], extr[1] = get_point_cloud_from_camera(
         img2,
-        depth2,
+        depth[1],
         camera_names[1],
     )
 
@@ -134,7 +137,7 @@ def get_point_cloud_from_obs(obs, zfar, znear, camera_names=camera_names):
     pcd_merged.points = o3d.utility.Vector3dVector(all_points)
     pcd_merged.colors = o3d.utility.Vector3dVector(all_colors)
 
-    return pcd_merged, depth1, intr, extr
+    return pcd_merged, depth, intr, extr
 
 
 def get_joint_state_from_obs(obs):
@@ -276,12 +279,16 @@ class MotionController:
         T_robot = np.eye(4, dtype=np.float64)
         T_robot[:3, :3] = robot_rotation_matrix
         T_robot[:3, 3] = robot_position
-        cam_extr_mat = cam_extr_mat @ T_robot
+        for i in range(len(cam_extr_mat)):
+            cam_extr_mat[i] = cam_extr_mat[i] @ T_robot
 
         js = self.get_joint_state()
+        self.traj_optimizer.grasp_finder.set_transform_matrix(
+            cam_extr_mat=cam_extr_mat[1]
+        )
         try:
             actions = self.traj_optimizer.plan_trajectory(
-                js, img, depth, pcd, prompt, cam_intr_mat, cam_extr_mat
+                js, img, depth[0], pcd, prompt, cam_intr_mat[0], cam_extr_mat[0]
             )
         except Exception as e:
             log.error(f"Error: {e}")
@@ -311,7 +318,7 @@ class MotionController:
     def make_video(self, task_id=None, eval_index=None):
         # make video
         video_writer = imageio.get_writer(
-            f"outputs/test_{task_id if task_id is not None else 'latest'}_{eval_index if eval_index is not None else 'latest'}_{'success' if self.done else 'fail'}.mp4",
+            f"outputs/{task_type}_{task_id if task_id is not None else 'latest'}_{eval_index if eval_index is not None else 'latest'}_{'success' if self.done else 'fail'}.mp4",
             fps=30,
         )
         for image in self.images:
@@ -399,6 +406,6 @@ if __name__ == "__main__":
 
         # log to external file
         with open("outputs/success_rate.txt", "a") as f:
-            f.write(f"Task {task_id}: {success} / {total}\n")
+            f.write(f"{task_type} {task_id}: {success} / {total}\n")
 
         env.close()

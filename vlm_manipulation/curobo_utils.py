@@ -285,6 +285,13 @@ class SAM2:
             point_coords=np.expand_dims(point_coords, axis=0),
             point_labels=np.array([1]),
         )
+        for i in range(masks.shape[0]):
+            mask = masks[i]
+            mask = mask.astype(np.uint8)
+            mask = mask * 255
+            mask = Image.fromarray(mask)
+            mask.save(f"outputs/mask_{i}.png")
+
         # masks is a 3D tensor, (n_masks, height, width)
         # we need to convert it to 2D tensor, (height, width)
         # we use the second mask, which is the most confident mask empirically
@@ -296,7 +303,12 @@ class GraspPoseFinder:
         self.gsnet = GSNet()
         # for axis conversion between GSNet and isaaclab
         # TODO: convert it to camera-centric coordinate system
-        self.transform_matrix = np.diag([1, -1, -1])
+        self.transform_matrix = np.diag([1, -1, -1, 1])
+
+    def set_transform_matrix(self, cam_extr_mat=None):
+        if cam_extr_mat is not None:
+            log.debug(f"cam_extr_mat: {cam_extr_mat}")
+            self.transform_matrix = cam_extr_mat
 
     def find(
         self,
@@ -359,12 +371,23 @@ class GraspPoseFinder:
         pcd.colors = o3d.utility.Vector3dVector(colors_masked)
         o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
 
-        grasps = self.gsnet.inference(np.array(pcd.points) @ self.transform_matrix)
-        grasps.translations = grasps.translations @ self.transform_matrix.T
-        grasps.rotation_matrices = (
-            self.transform_matrix @ grasps.rotation_matrices @ self.transform_matrix.T
+        points_transformed = (
+            np.array(pcd.points) @ self.transform_matrix[:3, :3].T
+            + self.transform_matrix[:3, 3]
         )
-        # grasps.translations += points_masked_mean
+
+        pcd.points = o3d.utility.Vector3dVector(points_transformed)
+        pcd.colors = o3d.utility.Vector3dVector(colors_masked)
+        o3d.io.write_point_cloud("outputs/pcd_transformed.ply", pcd)
+
+        grasps = self.gsnet.inference(points_transformed)
+        grasps.translations = (
+            grasps.translations - self.transform_matrix[:3, 3]
+        ) @ self.transform_matrix[:3, :3]
+
+        grasps.rotation_matrices = (
+            self.transform_matrix[:3, :3].T @ grasps.rotation_matrices
+        )
 
         # Filter out grasps that has width larger than 0.08 (franka finger width)
         # grasps = grasps[grasps.widths <= 0.08]
@@ -562,8 +585,6 @@ class TrajOptimizer:
         """Convert the grasp pose to franka end-effector pose."""
         positions = grasps.translations.copy()
         rotations = grasps.rotation_matrices.copy()
-        quats = R.from_matrix(rotations).as_quat()
-        log.info(f"Quats: {quats}")
         rotation_transform_for_franka = torch.tensor(
             [
                 [
@@ -622,7 +643,7 @@ class TrajOptimizer:
             # cuboid=[
             # Cuboid(
             # name="ground",
-            # pose=[0.0, 0.0, -0.2, 1.0, 0.0, 0.0, 0.0],
+            # pose=[0.0, 0.0, -0.25, 1.0, 0.0, 0.0, 0.0],
             # dims=[3.0, 3.0, 0.4],
             # ),
             # ],
@@ -848,18 +869,18 @@ class TrajOptimizer:
         )
 
         # segmentation mask to pixel coordinates (n x 2), only true pixels
-        object_center_pixels = np.where(segmentation_mask)
-        object_center_pixels = np.stack(
-            [object_center_pixels[1], object_center_pixels[0]], axis=1
-        )
+        # object_center_pixels = np.where(segmentation_mask)
+        # object_center_pixels = np.stack(
+            # [object_center_pixels[1], object_center_pixels[0]], axis=1
+        # )
 
-        # predict "object center" in 3d with segmentation mask and depth image, and camera extrinsic matrix
-        object_center_3d = self._get_3d_point_from_pixels(
-            object_center_pixels, depth, camera_intr_mat, camera_extr_mat
-        )
+        # # predict "object center" in 3d with segmentation mask and depth image, and camera extrinsic matrix
+        # object_center_3d = self._get_3d_point_from_pixels(
+            # object_center_pixels, depth, camera_intr_mat, camera_extr_mat
+        # )
+        # start_point_3d = np.median(object_center_3d, axis=0)
+        # log.debug(f"refined start_point_3d: {start_point_3d}")
         log.debug(f"start_point_3d: {start_point_3d}")
-        start_point_3d = np.median(object_center_3d, axis=0)
-        log.debug(f"refined start_point_3d: {start_point_3d}")
 
         end_time = time.time()
         log.error(
