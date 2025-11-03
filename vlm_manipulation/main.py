@@ -24,7 +24,7 @@ rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
 H, W = 1024, 1024
-camera_names = ["agentview", "sideview"]
+camera_names = ["agentview", "robot0_eye_in_hand"]
 
 task_type = "libero_object"
 
@@ -148,6 +148,7 @@ def step_to_target_pos(env, obs, target_pos):
 
     # invert for gripper qpos
     diff[-1] *= -1
+    # print(f"diff: {diff}")
 
     return env.step(diff.tolist())
 
@@ -198,6 +199,29 @@ class MotionController:
             self.obs = obs
             self.done = self.done or done
 
+    def initial_act(self, step: int):
+        for _ in range(step):
+            obs, _, done, _ = step_to_target_pos(
+                self.env,
+                self.obs,
+                torch.tensor(
+                    [
+                        0.0474,
+                        -1.2568,
+                        -0.0058,
+                        -2.2100,
+                        -0.0277,
+                        1.4764,
+                        0.8196,
+                        0.0400,
+                        0.0400,
+                    ]
+                ),
+            )
+            self.obs = obs
+            self.done = self.done or done
+            # self.images.append(obs["agentview_image"][::-1])
+
     def act(self, actions):
         for action in actions:
             # log.info(f"Action: {action}")
@@ -236,7 +260,7 @@ class MotionController:
         start_time = time.time()
 
         """Simulate the robot from prompt."""
-        self.dummy_act(10)
+        self.initial_act(50)
 
         log.error(f"[Main] Time taken to dummy act: {time.time() - start_time}")
 
@@ -255,9 +279,24 @@ class MotionController:
         cam_extr_mat = cam_extr_mat @ T_robot
 
         js = self.get_joint_state()
-        actions = self.traj_optimizer.plan_trajectory(
-            js, img, depth, pcd, prompt, cam_intr_mat, cam_extr_mat
-        )
+        try:
+            actions = self.traj_optimizer.plan_trajectory(
+                js, img, depth, pcd, prompt, cam_intr_mat, cam_extr_mat
+            )
+        except Exception as e:
+            log.error(f"Error: {e}")
+            self.done = False
+            return self.obs, self.done
+
+        # pose_actions = self.traj_optimizer.plan_pose_single(
+        # self.traj_optimizer.get_joint_state(self.get_joint_state().position),
+        # torch.tensor([0.12, 0.0, 0.75], dtype=torch.float32).to("cuda:0"),
+        # torch.tensor([0.0, -0.965926, 0.0, -0.258819], dtype=torch.float32).to(
+        # "cuda:0"
+        # ),
+        # open_gripper=False,
+        # )
+        # print(pose_actions)
 
         end_time = time.time()
         log.error(f"[Main] Time taken to plan trajectory: {end_time - start_time}")
@@ -350,14 +389,11 @@ if __name__ == "__main__":
             # we need to modify the camera position
             modify_sideview_camera(env)
 
-            try:
-                mc = MotionController(env, obs, traj_optimizer)
-                obs, done = mc.simulate_from_prompt(task.language)
-                mc.make_video(task_id, eval_index)
-                if done:
-                    success += 1
-            except Exception as e:
-                log.error(f"Error: {e}")
+            mc = MotionController(env, obs, traj_optimizer)
+            obs, done = mc.simulate_from_prompt(task.language)
+            mc.make_video(task_id, eval_index)
+            if done:
+                success += 1
             total += 1
             log.info(f"Success Rate for Task {task_id}: {success} / {total}")
 

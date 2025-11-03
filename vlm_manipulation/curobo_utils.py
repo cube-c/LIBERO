@@ -273,23 +273,15 @@ class VLMPointExtractor:
         return all_points
 
 
-class GraspPoseFinder:
+class SAM2:
     def __init__(self):
-        self.gsnet = GSNet()
         self.checkpoint = "./third_party/sam2/checkpoints/sam2.1_hiera_large.pt"
         self.model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
-        self.mask_predictor = SAM2ImagePredictor(
-            build_sam2(self.model_cfg, self.checkpoint)
-        )
+        self.sam2 = SAM2ImagePredictor(build_sam2(self.model_cfg, self.checkpoint))
 
-        # for axis conversion between GSNet and isaaclab
-        # TODO: check if this is necessary
-        self.transform_matrix = np.diag([1, -1, -1])
-
-    def _get_segmentation_mask(self, img: Image.Image, point_coords: np.ndarray):
-        self.mask_predictor.set_image(img)
-        log.info(f"point_coord : {point_coords}")
-        masks, _, _ = self.mask_predictor.predict(
+    def get_segmentation_mask(self, img: Image.Image, point_coords: np.ndarray):
+        self.sam2.set_image(img)
+        masks, _, _ = self.sam2.predict(
             point_coords=np.expand_dims(point_coords, axis=0),
             point_labels=np.array([1]),
         )
@@ -298,14 +290,21 @@ class GraspPoseFinder:
         # we use the second mask, which is the most confident mask empirically
         return masks[1]
 
+
+class GraspPoseFinder:
+    def __init__(self):
+        self.gsnet = GSNet()
+        # for axis conversion between GSNet and isaaclab
+        # TODO: convert it to camera-centric coordinate system
+        self.transform_matrix = np.diag([1, -1, -1])
+
     def find(
         self,
         pcd: o3d.geometry.PointCloud,
-        img: Image.Image,
         focus_point: np.ndarray,
-        focus_point_2d: np.ndarray,
         camera_intr_mat: np.ndarray,
         camera_extr_mat: np.ndarray,
+        segmentation_mask: np.ndarray,
     ):
         points = np.array(pcd.points)
         colors = np.array(pcd.colors)
@@ -321,10 +320,6 @@ class GraspPoseFinder:
         # first, mask with focus point
         point_mask = np.logical_and(
             point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.3
-        )
-        # # second, mask with segmentation mask
-        segmentation_mask = self._get_segmentation_mask(
-            img, point_coords=focus_point_2d
         )
 
         # transform points to 2d viewpoint coordinate
@@ -422,6 +417,7 @@ class TrajOptimizer:
     def __init__(self):
         self.point_extractor = VLMPointExtractor()
         self.grasp_finder = GraspPoseFinder()
+        self.sam2 = SAM2()
 
         self.robot_gripper_open_q = [0.04, 0.04]
         self.robot_gripper_close_q = [0.00, 0.00]
@@ -440,6 +436,49 @@ class TrajOptimizer:
         self.robot_config = RobotConfig.from_dict(self.config_file, tensor_args)
         self.kin_model = CudaRobotModel(self.robot_config.kinematics)
 
+    def _get_3d_point_from_pixels(
+        self,
+        pixels,  # iterable of (x, y) pixel coords
+        depth,  # HxW depth array (same frame as pixels)
+        cam_intr_mat,  # 3x3 intrinsics K
+        cam_extr_mat,  # 4x4 extrinsics; by default assumed world->camera
+    ):
+        """
+        Returns:
+            pts_3d: (N, 3) ndarray of 3D points in *world*
+        """
+        pixels = np.asarray(pixels, dtype=np.float64)
+        if pixels.ndim != 2 or pixels.shape[1] != 2:
+            raise ValueError("pixels must be an array of shape (N,2)")
+
+        H, W = depth.shape[:2]
+        fx, fy = cam_intr_mat[0, 0], cam_intr_mat[1, 1]
+        cx, cy = cam_intr_mat[0, 2], cam_intr_mat[1, 2]
+
+        # index into depth
+        xs = pixels[:, 0]
+        ys = pixels[:, 1]
+        xi = xs.astype(int)
+        yi = ys.astype(int)
+        z = depth[yi, xi].astype(np.float64).flatten()
+
+        X = (xs - cx) * z / fx
+        Y = (ys - cy) * z / fy
+        Z = z
+        pts_cam = np.stack([X, Y, Z], axis=1)
+
+        # to world frame via a rigid transform
+        cam_extr = np.array(cam_extr_mat)
+        cam_extr = np.linalg.inv(cam_extr)
+        T = np.asarray(cam_extr, dtype=np.float64)
+
+        pts_cam_h = np.concatenate(
+            [pts_cam, np.ones((len(pixels), 1))], axis=1
+        )  # (N,4)
+        pts_world_h = (T @ pts_cam_h.T).T
+        pts_world = pts_world_h[:, :3]
+        return pts_world
+
     def _get_3d_point_from_pixel(self, pixel_point, depth, cam_intr_mat, cam_extr_mat):
         """
         Convert 2D pixel coordinates to 3D points using the point cloud.
@@ -448,7 +487,7 @@ class TrajOptimizer:
         there's a direct mapping between pixels and 3D points.
 
         Args:
-            pixel_points: List of 2D pixel coordinates [(x, y), ...]
+            pixel_point: 2D pixel coordinates (x, y)
             pcd_array: numpy array of point cloud
             camera_intrinsics: Camera intrinsic matrix (optional)
             camera_extrinsics: Camera extrinsic matrix (optional)
@@ -796,13 +835,31 @@ class TrajOptimizer:
         start_point = seq[0]["pick_up"]
         end_point = seq[0]["place_down"]
 
-        log.info(f"3d point of pixel: {start_point} / {end_point}")
+        log.info(f"2d point of pixel: {start_point} / {end_point}")
+
+        segmentation_mask = self.sam2.get_segmentation_mask(img, start_point)
+
         start_point_3d = self._get_3d_point_from_pixel(
             start_point, depth, camera_intr_mat, camera_extr_mat
         )
+
         end_point_3d = self._get_3d_point_from_pixel(
             end_point, depth, camera_intr_mat, camera_extr_mat
         )
+
+        # segmentation mask to pixel coordinates (n x 2), only true pixels
+        object_center_pixels = np.where(segmentation_mask)
+        object_center_pixels = np.stack(
+            [object_center_pixels[1], object_center_pixels[0]], axis=1
+        )
+
+        # predict "object center" in 3d with segmentation mask and depth image, and camera extrinsic matrix
+        object_center_3d = self._get_3d_point_from_pixels(
+            object_center_pixels, depth, camera_intr_mat, camera_extr_mat
+        )
+        log.debug(f"start_point_3d: {start_point_3d}")
+        start_point_3d = np.median(object_center_3d, axis=0)
+        log.debug(f"refined start_point_3d: {start_point_3d}")
 
         end_time = time.time()
         log.error(
@@ -832,11 +889,10 @@ class TrajOptimizer:
         N = 16
         gg = self.grasp_finder.find(
             pcd,
-            img,
             focus_point=start_point_3d,
-            focus_point_2d=start_point,
             camera_intr_mat=camera_intr_mat,
             camera_extr_mat=camera_extr_mat,
+            segmentation_mask=segmentation_mask,
         )
         gg = self._sorted_grasp_by_distance(start_point_3d, gg)
 
@@ -939,14 +995,14 @@ class TrajOptimizer:
                 .unsqueeze(0)
                 .unsqueeze(0)
             )
-            ee_pos_putdown = (
-                torch.tensor(
-                    end_point_3d + rotations @ ee_from_point, dtype=torch.float32
-                )
-                .to("cuda:0")
-                .unsqueeze(0)
-                .unsqueeze(0)
+            ee_pos_putdown = torch.tensor(end_point_3d, dtype=torch.float32).to(
+                "cuda:0"
+            ).unsqueeze(0).unsqueeze(0) + (R_180 @ ee_from_point.squeeze()).unsqueeze(
+                0
+            ).unsqueeze(
+                0
             )
+            ee_pos_putdown[:, :, 2] += 0.3
 
             joint_pos.append(
                 self.plan_pose_single(
