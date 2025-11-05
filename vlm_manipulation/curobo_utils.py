@@ -301,9 +301,7 @@ class SAM2:
 class GraspPoseFinder:
     def __init__(self):
         self.gsnet = GSNet()
-        # for axis conversion between GSNet and isaaclab
-        # TODO: convert it to camera-centric coordinate system
-        self.transform_matrix = np.diag([1, -1, -1, 1])
+        self.transform_matrix = None
 
     def set_transform_matrix(self, cam_extr_mat=None):
         if cam_extr_mat is not None:
@@ -331,36 +329,32 @@ class GraspPoseFinder:
 
         # first, mask with focus point
         point_mask = np.logical_and(
-            point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.3
+            point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.2
         )
 
         # transform points to 2d viewpoint coordinate
-        log.info(f"camera_extr_mat: {camera_extr_mat}")
-        log.info(f"camera_intr_mat: {camera_intr_mat}")
-        points_2d = (
-            camera_intr_mat
-            @ camera_extr_mat[:3, :]
-            @ np.concatenate([points, np.ones((points.shape[0], 1))], axis=1).T
-        ).T
-        points_2d = points_2d[:, :2] / points_2d[:, 2:3]
-        # out of bounds check
-        points_x = np.clip(points_2d[:, 0], 0, segmentation_mask.shape[1] - 1).astype(
-            int
-        )
-        points_y = np.clip(points_2d[:, 1], 0, segmentation_mask.shape[0] - 1).astype(
-            int
-        )
-        segmentation_mask = segmentation_mask[points_y, points_x]
+        # log.info(f"camera_extr_mat: {camera_extr_mat}")
+        # log.info(f"camera_intr_mat: {camera_intr_mat}")
+        # points_2d = (
+        # camera_intr_mat
+        # @ camera_extr_mat[:3, :]
+        # @ np.concatenate([points, np.ones((points.shape[0], 1))], axis=1).T
+        # ).T
+        # points_2d = points_2d[:, :2] / points_2d[:, 2:3]
+        # # out of bounds check
+        # points_x = np.clip(points_2d[:, 0], 0, segmentation_mask.shape[1] - 1).astype(
+        # int
+        # )
+        # points_y = np.clip(points_2d[:, 1], 0, segmentation_mask.shape[0] - 1).astype(
+        # int
+        # )
+        # segmentation_mask = segmentation_mask[points_y, points_x]
 
-        point_mask = np.logical_and(point_mask, segmentation_mask)
+        # point_mask = np.logical_and(point_mask, segmentation_mask)
 
         # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
         points_masked = points[point_mask]
         colors_masked = colors[point_mask]
-
-        # move points to origin
-        # points_masked_mean = points_masked.mean(axis=0)
-        # points_masked -= points_masked_mean
 
         log.info(
             f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
@@ -388,12 +382,30 @@ class GraspPoseFinder:
         grasps.rotation_matrices = (
             self.transform_matrix[:3, :3].T @ grasps.rotation_matrices
         )
-
-        # Filter out grasps that has width larger than 0.08 (franka finger width)
-        # grasps = grasps[grasps.widths <= 0.08]
-
-        # log best grasp candidate
         log.info(f"Total grasp candidates: {len(grasps)}")
+
+        # log.info(f"camera_extr_mat: {camera_extr_mat}")
+        # log.info(f"camera_intr_mat: {camera_intr_mat}")
+        points_2d = (
+            camera_intr_mat
+            @ camera_extr_mat[:3, :]
+            @ np.concatenate([grasps.translations, np.ones((len(grasps), 1))], axis=1).T
+        ).T
+        points_2d = points_2d[:, :2] / points_2d[:, 2:3]
+        # out of bounds check
+        points_x = np.clip(points_2d[:, 0], 0, segmentation_mask.shape[1] - 1).astype(
+            int
+        )
+        points_y = np.clip(points_2d[:, 1], 0, segmentation_mask.shape[0] - 1).astype(
+            int
+        )
+        segmentation_mask = segmentation_mask[points_y, points_x]
+
+        log.info(
+            f"Total grasp candidates after filtering: {len(grasps[segmentation_mask.astype(bool)])}"
+        )
+        grasps = grasps[segmentation_mask.astype(bool)]
+        # log best grasp candidate
 
         return grasps
 
@@ -595,11 +607,12 @@ class TrajOptimizer:
             ],
         )
         rotations = (
-            torch.tensor(rotations, dtype=torch.float32).transpose(2, 1)
-            @ rotation_transform_for_franka
+            torch.tensor(rotations, dtype=torch.float32) @ rotation_transform_for_franka
         )
 
         quats = R.from_matrix(rotations).as_quat()
+        # convert to wxyz format
+        quats = np.concatenate([quats[..., 3:4], quats[..., :3]], axis=-1)
 
         log.info(f"Positions: {positions}")
         log.info(f"Quats: {quats}")
@@ -746,15 +759,42 @@ class TrajOptimizer:
         depth: float = 0.03,  # TODO: use depth from grasp finder
     ):
         """Plan the grasp."""
+
+        cu_js = JointState.get_ordered_joint_state(js, list(self.kin_model.joint_names))
+        disable_collision_links = [
+            "panda_hand",
+            "panda_leftfinger",
+            "panda_rightfinger",
+        ]
+        # make batch instead of goalset
+        ik_goal = Pose(
+            position=ee_pos_target.transpose(0, 1),
+            quaternion=ee_quat_target.transpose(0, 1),
+        )
+        batch_cu_js = cu_js.repeat_seeds(ee_pos_target.shape[1])
+
+        # first, check reachability with plan_goalset
+        self.motion_gen.toggle_link_collision(disable_collision_links, False)
+        batch_motion_gen_result = self.motion_gen.plan_batch(
+            batch_cu_js,
+            ik_goal,
+            self.get_plan_config(),
+        )
+        self.motion_gen.toggle_link_collision(disable_collision_links, True)
+        if not torch.any(batch_motion_gen_result.success):
+            log.error("No successful grasp motion plan found.")
+            return None
+        else:
+            log.debug(f"Reachablility: {batch_motion_gen_result.success}")
+
         for i in range(ee_pos_target.shape[1]):
+            if not batch_motion_gen_result.success[i].item():
+                continue
             ik_goal = Pose(
                 position=ee_pos_target[:, i : i + 1, :],
                 quaternion=ee_quat_target[:, i : i + 1, :],
             )
             log.debug(f"IK goal: {ik_goal}")
-            cu_js = JointState.get_ordered_joint_state(
-                js, list(self.kin_model.joint_names)
-            )
 
             result = self.motion_gen.plan_grasp(
                 start_state=cu_js,
@@ -768,11 +808,7 @@ class TrajOptimizer:
                     position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
                     quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
                 ),
-                disable_collision_links=[
-                    "panda_hand",
-                    "panda_leftfinger",
-                    "panda_rightfinger",
-                ],
+                disable_collision_links=disable_collision_links,
             )
             log.debug(f"Motion planning result:{result.success}")
             if result.success:
@@ -841,7 +877,16 @@ class TrajOptimizer:
         return joint_pos
 
     def plan_trajectory(
-        self, js: JointState, img, depth, pcd, prompt, camera_intr_mat, camera_extr_mat
+        self,
+        js: JointState,
+        img,
+        depth,
+        pcd,
+        prompt,
+        camera_intr_mat,
+        camera_extr_mat,
+        task_id,
+        eval_index,
     ):
         start_time = time.time()
         seq = self.point_extractor.extract_sequence(img, prompt)
@@ -871,12 +916,12 @@ class TrajOptimizer:
         # segmentation mask to pixel coordinates (n x 2), only true pixels
         # object_center_pixels = np.where(segmentation_mask)
         # object_center_pixels = np.stack(
-            # [object_center_pixels[1], object_center_pixels[0]], axis=1
+        # [object_center_pixels[1], object_center_pixels[0]], axis=1
         # )
 
         # # predict "object center" in 3d with segmentation mask and depth image, and camera extrinsic matrix
         # object_center_3d = self._get_3d_point_from_pixels(
-            # object_center_pixels, depth, camera_intr_mat, camera_extr_mat
+        # object_center_pixels, depth, camera_intr_mat, camera_extr_mat
         # )
         # start_point_3d = np.median(object_center_3d, axis=0)
         # log.debug(f"refined start_point_3d: {start_point_3d}")
@@ -892,7 +937,7 @@ class TrajOptimizer:
         draw = ImageDraw.Draw(img)
         draw.circle(start_point, 4, fill="red")
         draw.circle(end_point, 4, fill="blue")
-        img.save(f"outputs/image.png")
+        img.save(f"outputs/image_{task_id}_{eval_index}.png")
 
         pcd = self._filter_out_robot_from_pcd(pcd)
         end_time = time.time()

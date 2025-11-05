@@ -288,7 +288,15 @@ class MotionController:
         )
         try:
             actions = self.traj_optimizer.plan_trajectory(
-                js, img, depth[0], pcd, prompt, cam_intr_mat[0], cam_extr_mat[0]
+                js,
+                img,
+                depth[0],
+                pcd,
+                prompt,
+                cam_intr_mat[0],
+                cam_extr_mat[0],
+                task_id,
+                eval_index,
             )
         except Exception as e:
             log.error(f"Error: {e}")
