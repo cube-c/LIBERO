@@ -2,6 +2,6 @@
 	path = third_party/curobo
 	url = https://github.com/NVlabs/curobo.git
 
-[submodule "third_party/gsnet"]
-	path = third_party/gsnet
-	url = https://github.com/graspnet/graspnet-baseline.git
+[submodule "third_party/GraspGen"]
+	path = third_party/GraspGen
+	url = https://github.com/NVlabs/GraspGen.git

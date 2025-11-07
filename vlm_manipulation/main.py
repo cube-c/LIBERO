@@ -26,7 +26,7 @@ log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 H, W = 1024, 1024
 camera_names = ["agentview", "robot0_eye_in_hand"]
 
-task_type = "libero_spatial"
+task_type = "libero_object"
 
 
 def depth_buffer_to_depth_image(depth, zfar, znear):
@@ -117,27 +117,11 @@ def get_point_cloud_from_obs(obs, zfar, znear, camera_names=camera_names):
         o3d.pipelines.registration.TransformationEstimationPointToPlane(),
     )
 
-    # Convert to numpy arrays
-    pts1 = np.asarray(pcd1.points)  # shape (N, 3)
-    pts2 = np.asarray(pcd2.points)  # shape (M, 3)
+    pcd = [None, None]
+    pcd[0] = pcd1
+    pcd[1] = pcd2.transform(reg.transformation)
 
-    # Apply transformation to pcd2
-    T = reg.transformation  # shape (4, 4)
-    pts2_h = np.hstack((pts2, np.ones((pts2.shape[0], 1))))  # shape (M, 4)
-    pts2_transformed = (T @ pts2_h.T).T[:, :3]
-
-    pts1 = np.asarray(pcd1.points)
-    all_points = np.vstack((pts1, pts2_transformed))
-
-    colors1 = np.asarray(pcd1.colors)
-    colors2 = np.asarray(pcd2.colors)
-    all_colors = np.vstack((colors1, colors2))
-
-    pcd_merged = o3d.geometry.PointCloud()
-    pcd_merged.points = o3d.utility.Vector3dVector(all_points)
-    pcd_merged.colors = o3d.utility.Vector3dVector(all_colors)
-
-    return pcd_merged, depth, intr, extr
+    return pcd, depth, intr, extr
 
 
 def get_joint_state_from_obs(obs):
@@ -235,29 +219,29 @@ class MotionController:
             self.obs = obs
             self.images.append(obs["agentview_image"][::-1])
 
-    def get_point_cloud(self):
+    def get_point_clouds(self):
         # point cloud from agentview
         sim = self.env.env.sim
         extent = float(sim.model.stat.extent)
         zfar = sim.model.vis.map.zfar * extent
         znear = sim.model.vis.map.znear * extent
-        pcd, depth, intr, extr = get_point_cloud_from_obs(self.obs, zfar, znear)
+        pcds, depth, intr, extr = get_point_cloud_from_obs(self.obs, zfar, znear)
 
-        return pcd, depth, intr, extr
+        return pcds, depth, intr, extr
 
-    def pcd_to_robot_center(self, pcd):
-        points = np.asarray(pcd.points)
-
+    def pcd_to_robot_center(self, pcds: list[o3d.geometry.PointCloud]):
         robot = self.env.env.robots[0]
         sim = self.env.env.sim
         bid = sim.model.body_name2id(robot.robot_model.root_body)
         robot_position = sim.data.body_xpos[bid].copy()
         robot_rotation_matrix = sim.data.body_xmat[bid].reshape(3, 3).copy()
-
-        points = points - robot_position
-        points = points @ robot_rotation_matrix.T
-        pcd.points = o3d.utility.Vector3dVector(points)
-        return pcd, robot_position, robot_rotation_matrix
+        
+        pcds_transformed = []
+        for pcd in pcds:
+            pcd = pcd.translate(-robot_position)
+            pcd = pcd.rotate(robot_rotation_matrix.T)
+            pcds_transformed.append(pcd)
+        return pcds_transformed, robot_position, robot_rotation_matrix
 
     def simulate_from_prompt(self, prompt: str):
         start_time = time.time()
@@ -267,9 +251,11 @@ class MotionController:
 
         log.error(f"[Main] Time taken to dummy act: {time.time() - start_time}")
 
-        img = Image.fromarray(self.obs["agentview_image"][::-1])
-        pcd, depth, cam_intr_mat, cam_extr_mat = self.get_point_cloud()
-        pcd, robot_position, robot_rotation_matrix = self.pcd_to_robot_center(pcd)
+        images = []
+        for camera_name in camera_names:
+            images.append(Image.fromarray(self.obs[camera_name + "_image"][::-1]))
+        pcds, depth, cam_intr_mat, cam_extr_mat = self.get_point_clouds()
+        pcds, robot_position, robot_rotation_matrix = self.pcd_to_robot_center(pcds)
         # o3d.io.write_point_cloud("outputs/merged.ply", pcd)
 
         end_time = time.time()
@@ -289,12 +275,12 @@ class MotionController:
         try:
             actions = self.traj_optimizer.plan_trajectory(
                 js,
-                img,
-                depth[0],
-                pcd,
+                images,
+                depth,
+                pcds,
                 prompt,
-                cam_intr_mat[0],
-                cam_extr_mat[0],
+                cam_intr_mat,
+                cam_extr_mat,
                 task_id,
                 eval_index,
             )
@@ -302,7 +288,6 @@ class MotionController:
             log.error(f"Error: {e}")
             self.done = False
             return self.obs, self.done
-
         # pose_actions = self.traj_optimizer.plan_pose_single(
         # self.traj_optimizer.get_joint_state(self.get_joint_state().position),
         # torch.tensor([0.12, 0.0, 0.75], dtype=torch.float32).to("cuda:0"),

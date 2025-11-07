@@ -10,6 +10,7 @@ import copy
 import numpy as np
 import rootutils
 import torch
+import cv2
 from loguru import logger as log
 from rich.logging import RichHandler
 from PIL import Image, ImageDraw
@@ -42,7 +43,6 @@ from curobo.wrap.reacher.motion_gen import (
     MotionGenPlanConfig,
     MotionGenConfig,
 )
-from vlm_manipulation.gsnet_utils import GSNet
 
 from third_party.sam2.sam2.sam2_image_predictor import SAM2ImagePredictor
 from third_party.sam2.sam2.build_sam import build_sam2
@@ -293,58 +293,41 @@ class SAM2:
             mask = Image.fromarray(mask)
             mask.save(f"outputs/mask_{i}.png")
 
-        # masks is a 3D tensor, (n_masks, height, width)
-        # we need to convert it to 2D tensor, (height, width)
-        # we use the second mask, which is the most confident mask empirically
-        return masks[1]
+        _, labels = cv2.connectedComponents(masks[1].astype(np.uint8) * 255)
+        seed_label = labels[point_coords[1], point_coords[0]]
+        connected_mask = (labels == seed_label)
 
+        connected_mask_render = connected_mask.astype(np.uint8) * 255
+        connected_mask_render = Image.fromarray(connected_mask_render)
+        connected_mask_render.save(f"outputs/mask_connected.png")
 
-class GraspPoseFinder:
-    def __init__(self):
-        self.gsnet = GSNet()
-        self.grasp_cfg = load_grasp_cfg(
-            "third_party/GraspGen/models/checkpoints/graspgen_franka_panda.yml"
-        )
-        self.grasp_sampler = GraspGenSampler(self.grasp_cfg)
-        self.transform_matrix = None
+        return connected_mask
 
-    def set_transform_matrix(self, cam_extr_mat=None):
-        if cam_extr_mat is not None:
-            log.debug(f"cam_extr_mat: {cam_extr_mat}")
-            self.transform_matrix = cam_extr_mat
-
-    def find(
-        self,
+    def segment_from_pcd(self, 
         pcd: o3d.geometry.PointCloud,
-        focus_point: np.ndarray,
+        img: Image.Image,
+        focus_point: np.ndarray, # 3d
         camera_intr_mat: np.ndarray,
         camera_extr_mat: np.ndarray,
-        segmentation_mask: np.ndarray,
     ):
         points = np.array(pcd.points)
-        colors = np.array(pcd.colors)
-
-        point_mask = np.logical_and(
-            points[:, 2] < 0.2,
-            np.logical_and(
-                np.abs(points[:, 0] - 0.5) < 0.5,
-                np.abs(points[:, 1]) < 0.5,
-            ),
-        )
-
-        # first, mask with focus point
-        point_mask = np.logical_and(
-            point_mask, np.linalg.norm(points - focus_point, axis=1) < 0.2
-        )
-
-        # transform points to 2d viewpoint coordinate
-        # log.info(f"camera_extr_mat: {camera_extr_mat}")
-        # log.info(f"camera_intr_mat: {camera_intr_mat}")
         points_2d = (
             camera_intr_mat
             @ camera_extr_mat[:3, :]
             @ np.concatenate([points, np.ones((points.shape[0], 1))], axis=1).T
         ).T
+        
+        focus_point_2d = (
+            camera_intr_mat
+            @ camera_extr_mat[:3, :]
+            @ np.concatenate([focus_point.reshape(1, -1), np.ones((1, 1))], axis=1).T
+        ).T
+        focus_point_2d = focus_point_2d[:, :2] / focus_point_2d[:, 2:3]
+        focus_point_2d = focus_point_2d.squeeze().astype(np.int32)
+        log.debug(f"focus_point_2d: {focus_point_2d}")
+
+        segmentation_mask = self.get_segmentation_mask(img, focus_point_2d)
+
         points_2d = points_2d[:, :2] / points_2d[:, 2:3]
         # out of bounds check
         points_x = np.clip(points_2d[:, 0], 0, segmentation_mask.shape[1] - 1).astype(
@@ -354,32 +337,36 @@ class GraspPoseFinder:
             int
         )
         segmentation_mask = segmentation_mask[points_y, points_x]
+        return pcd.select_by_index(np.where(segmentation_mask)[0])
 
-        point_mask = np.logical_and(point_mask, segmentation_mask)
-
-        # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
-        points_masked = points[point_mask]
-        colors_masked = colors[point_mask]
-
-        log.info(
-            f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
-            f"Y[{points_masked[:, 1].min():.3f}, {points_masked[:, 1].max():.3f}], "
-            f"Z[{points_masked[:, 2].min():.3f}, {points_masked[:, 2].max():.3f}]"
+class GraspPoseFinder:
+    def __init__(self):
+        self.grasp_cfg = load_grasp_cfg(
+            "third_party/GraspGen/models/checkpoints/graspgen_franka_panda.yml"
         )
-        pcd.points = o3d.utility.Vector3dVector(points_masked)
-        pcd.colors = o3d.utility.Vector3dVector(colors_masked)
+        self.grasp_sampler = GraspGenSampler(self.grasp_cfg)
+        self.transform_matrix = None
+
+    def set_transform_matrix(self, cam_extr_mat):
+        self.transform_matrix = cam_extr_mat
+
+    def find(
+        self,
+        pcd: o3d.geometry.PointCloud,
+        focus_point: np.ndarray,
+    ):
+        points = np.array(pcd.points)
+
+        # mask with focus point
+        point_mask = np.linalg.norm(points - focus_point, axis=1) < 0.2
+        pcd = pcd.select_by_index(np.where(point_mask)[0])
+
         o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
+        pcd_transformed = pcd.transform(self.transform_matrix)
+        points_transformed = np.array(pcd_transformed.points)
+        o3d.io.write_point_cloud("outputs/pcd_transformed.ply", pcd_transformed)
 
-        points_transformed = (
-            np.array(pcd.points) @ self.transform_matrix[:3, :3].T
-            + self.transform_matrix[:3, 3]
-        )
-
-        pcd.points = o3d.utility.Vector3dVector(points_transformed)
-        pcd.colors = o3d.utility.Vector3dVector(colors_masked)
-        o3d.io.write_point_cloud("outputs/pcd_transformed.ply", pcd)
-
-        grasps_inferred, grasp_conf_inferred = GraspGenSampler.run_inference(
+        grasps_inferred, _ = GraspGenSampler.run_inference(
             points_transformed,
             self.grasp_sampler,
             grasp_threshold=0.8,
@@ -396,9 +383,6 @@ class GraspPoseFinder:
         grasps_rotation_matrices = (
             self.transform_matrix[:3, :3].T @ grasps_rotation_matrices
         )
-        for i in range(10):
-            log.debug(f"Grasp {i}: {grasps_translations[i]}")
-            log.debug(f"Grasp {i}: {grasps_rotation_matrices[i]}")
 
         log.info(f"Total grasp candidates: {len(grasps_translations)}")
 
@@ -564,7 +548,6 @@ class TrajOptimizer:
         # TODO : remove robot using segmentation
         # ex) https://github.com/NVlabs/curobo/blob/ebb71702f3f70e767f40fd8e050674af0288abe8/examples/robot_image_segmentation_example.py
         points = np.array(pcd.points)
-        colors = np.array(pcd.colors)
 
         robot_offset = np.array([0.0, 0.0, 1.0])
         robot_dimension = np.array([0.3, 0.3, 2.0])
@@ -574,19 +557,19 @@ class TrajOptimizer:
                 np.abs(points[:, 1] - robot_offset[1]) > robot_dimension[1] / 2,
                 np.abs(points[:, 2] - robot_offset[2]) > robot_dimension[2] / 2,
             ),
-            points[:, 2] < 0.2,
+            points[:, 2] < 0.5,
         )
-        points_filtered = points[point_mask]
-        colors_filtered = colors[point_mask]
-        pcd_filtered = o3d.geometry.PointCloud()
-        pcd_filtered.points = o3d.utility.Vector3dVector(points_filtered)
-        pcd_filtered.colors = o3d.utility.Vector3dVector(colors_filtered)
-        return pcd_filtered
+        return pcd.select_by_index(np.where(point_mask)[0])
 
-    def _sorted_grasp_by_distance(self, target_point, grasp_translations, grasp_rotation_matrices):
+    def _sorted_grasp_by_distance(
+        self, target_point, grasp_translations, grasp_rotation_matrices
+    ):
         dists = [np.linalg.norm(g - target_point) for g in grasp_translations]
         sorted_indices = np.argsort(dists)
-        return grasp_translations[sorted_indices], grasp_rotation_matrices[sorted_indices]
+        return (
+            grasp_translations[sorted_indices],
+            grasp_rotation_matrices[sorted_indices],
+        )
 
     def _grasp_to_franka(self, grasp_translations, grasp_rotation_matrices):
         """Convert the grasp pose to franka end-effector pose."""
@@ -616,18 +599,18 @@ class TrajOptimizer:
         positions = torch.tensor(positions, dtype=torch.float32)
         quats = torch.tensor(quats, dtype=torch.float32)
         # positions, quats = self._ee_pose_from_tcp_pose(
-            # tcp_pos=torch.tensor(positions, dtype=torch.float32),
-            # tcp_quat=torch.tensor(quats, dtype=torch.float32),
+        # tcp_pos=torch.tensor(positions, dtype=torch.float32),
+        # tcp_quat=torch.tensor(quats, dtype=torch.float32),
         # )
         # grasp_offset = torch.cat(
-            # [
-                # torch.zeros(len(grasps.depths), 2),
-                # torch.tensor(grasps.depths, dtype=torch.float32).unsqueeze(1),
-            # ],
-            # dim=1,
+        # [
+        # torch.zeros(len(grasps.depths), 2),
+        # torch.tensor(grasps.depths, dtype=torch.float32).unsqueeze(1),
+        # ],
+        # dim=1,
         # ).unsqueeze(2)
         # positions = positions + torch.matmul(
-            # matrix_from_quat(quats), grasp_offset
+        # matrix_from_quat(quats), grasp_offset
         # ).squeeze(2)
 
         # shape of (1, n_goalset, 3)
@@ -876,17 +859,17 @@ class TrajOptimizer:
     def plan_trajectory(
         self,
         js: JointState,
-        img,
-        depth,
-        pcd,
+        images: list[Image.Image],
+        depth: list[np.ndarray],
+        pcds: list[o3d.geometry.PointCloud],
         prompt,
-        camera_intr_mat,
-        camera_extr_mat,
+        camera_intr_mat: list[np.ndarray],
+        camera_extr_mat: list[np.ndarray],
         task_id,
         eval_index,
     ):
         start_time = time.time()
-        seq = self.point_extractor.extract_sequence(img, prompt)
+        seq = self.point_extractor.extract_sequence(images[0], prompt)
         end_time = time.time()
         log.error(
             f"[TrajOptimizer] Time taken to extract sequence: {end_time - start_time}"
@@ -900,48 +883,46 @@ class TrajOptimizer:
 
         log.info(f"2d point of pixel: {start_point} / {end_point}")
 
-        segmentation_mask = self.sam2.get_segmentation_mask(img, start_point)
-
         start_point_3d = self._get_3d_point_from_pixel(
-            start_point, depth, camera_intr_mat, camera_extr_mat
+            start_point, depth[0], camera_intr_mat[0], camera_extr_mat[0]
         )
-
-        end_point_3d = self._get_3d_point_from_pixel(
-            end_point, depth, camera_intr_mat, camera_extr_mat
-        )
-
-        # segmentation mask to pixel coordinates (n x 2), only true pixels
-        # object_center_pixels = np.where(segmentation_mask)
-        # object_center_pixels = np.stack(
-        # [object_center_pixels[1], object_center_pixels[0]], axis=1
-        # )
-
-        # # predict "object center" in 3d with segmentation mask and depth image, and camera extrinsic matrix
-        # object_center_3d = self._get_3d_point_from_pixels(
-        # object_center_pixels, depth, camera_intr_mat, camera_extr_mat
-        # )
-        # start_point_3d = np.median(object_center_3d, axis=0)
-        # log.debug(f"refined start_point_3d: {start_point_3d}")
         log.debug(f"start_point_3d: {start_point_3d}")
 
-        end_time = time.time()
-        log.error(
-            f"[TrajOptimizer] Time taken to get 3d points: {end_time - start_time}"
+        end_point_3d = self._get_3d_point_from_pixel(
+            end_point, depth[0], camera_intr_mat[0], camera_extr_mat[0]
         )
+
+        pcd_original = o3d.geometry.PointCloud()
+        for pcd in pcds:
+            pcd_original += pcd
+
+        pcd_segmented = o3d.geometry.PointCloud()
+        for pcd, img, intr, extr in zip(pcds, images, camera_intr_mat, camera_extr_mat):
+            pcd = self.sam2.segment_from_pcd(
+                pcd,
+                img,
+                start_point_3d,
+                intr,
+                extr,
+            )
+            pcd_segmented += pcd
+
+        log.debug(f"pcd_original: {len(pcd_original.points)}")
+        log.debug(f"pcd_segmented: {len(pcd_segmented.points)}")
 
         # TODO: add debug flag for visualization
         # Draw image
-        draw = ImageDraw.Draw(img)
+        draw = ImageDraw.Draw(images[0])
         draw.circle(start_point, 4, fill="red")
         draw.circle(end_point, 4, fill="blue")
-        img.save(f"outputs/image_{task_id}_{eval_index}.png")
+        images[0].save(f"outputs/image_{task_id}_{eval_index}.png")
 
-        pcd = self._filter_out_robot_from_pcd(pcd)
+        pcd_original = self._filter_out_robot_from_pcd(pcd_original)
         end_time = time.time()
         log.error(
             f"[TrajOptimizer] Time taken to filter out robot from pcd: {end_time - start_time}"
         )
-        self._set_motion_gen_with_pcd(pcd)
+        self._set_motion_gen_with_pcd(pcd_original)
 
         end_time = time.time()
         log.error(
@@ -949,15 +930,11 @@ class TrajOptimizer:
         )
 
         # number of grasp candidates to check
-        N = 16
-        gg_translations, gg_rotation_matrices = self.grasp_finder.find(
-            pcd,
-            focus_point=start_point_3d,
-            camera_intr_mat=camera_intr_mat,
-            camera_extr_mat=camera_extr_mat,
-            segmentation_mask=segmentation_mask,
+        N = 128
+        gg_translations, gg_rotation_matrices = self.grasp_finder.find(pcd_segmented, start_point_3d)
+        gg_translations, gg_rotation_matrices = self._sorted_grasp_by_distance(
+            start_point_3d, gg_translations, gg_rotation_matrices
         )
-        gg_translations, gg_rotation_matrices = self._sorted_grasp_by_distance(start_point_3d, gg_translations, gg_rotation_matrices)
 
         end_time = time.time()
         log.error(f"[TrajOptimizer] Time taken to find grasp: {end_time - start_time}")
@@ -969,7 +946,9 @@ class TrajOptimizer:
         # image_only=True,
         # filename=f"outputs/gsnet.png",
         # )
-        ee_pos_pickup, ee_quat_pickup = self._grasp_to_franka(gg_translations[:N], gg_rotation_matrices[:N])
+        ee_pos_pickup, ee_quat_pickup = self._grasp_to_franka(
+            gg_translations[:N], gg_rotation_matrices[:N]
+        )
 
         # Grasp
         joint_pos = []
