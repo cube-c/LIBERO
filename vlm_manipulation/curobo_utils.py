@@ -282,18 +282,18 @@ class SAM2:
 
     def get_segmentation_mask(self, img: Image.Image, point_coords: np.ndarray):
         self.sam2.set_image(img)
-        masks, _, _ = self.sam2.predict(
+        masks, iou_predictions, _ = self.sam2.predict(
             point_coords=np.expand_dims(point_coords, axis=0),
             point_labels=np.array([1]),
         )
-        for i in range(masks.shape[0]):
-            mask = masks[i]
-            mask = mask.astype(np.uint8)
-            mask = mask * 255
-            mask = Image.fromarray(mask)
-            mask.save(f"outputs/mask_{i}.png")
+        best_idx = np.argmax(iou_predictions)
+        mask = masks[best_idx]
+        mask_uint8 = mask.astype(np.uint8)
+        mask_uint8 = mask_uint8 * 255
+        mask_uint8 = Image.fromarray(mask_uint8)
+        mask_uint8.save(f"outputs/mask_best.png")
 
-        _, labels = cv2.connectedComponents(masks[1].astype(np.uint8) * 255)
+        _, labels = cv2.connectedComponents(mask.astype(np.uint8) * 255)
         seed_label = labels[point_coords[1], point_coords[0]]
         connected_mask = labels == seed_label
 
