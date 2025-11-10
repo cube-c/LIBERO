@@ -47,6 +47,10 @@ from curobo.wrap.reacher.motion_gen import (
 from third_party.sam2.sam2.sam2_image_predictor import SAM2ImagePredictor
 from third_party.sam2.sam2.build_sam import build_sam2
 from third_party.GraspGen.grasp_gen.grasp_server import GraspGenSampler, load_grasp_cfg
+from third_party.GraspGen.grasp_gen.utils.point_cloud_utils import (
+    filter_colliding_grasps,
+)
+from third_party.GraspGen.grasp_gen.robot import get_gripper_info
 
 
 class VLMPointExtractor:
@@ -338,7 +342,10 @@ class SAM2:
             int
         )
         segmentation_mask = segmentation_mask[points_y, points_x]
-        return pcd.select_by_index(np.where(segmentation_mask)[0])
+        # return two point clouds: one for the object and one for the scene
+        object_pcd = pcd.select_by_index(np.where(segmentation_mask)[0])
+        scene_pcd = pcd.select_by_index(np.where(~segmentation_mask)[0])
+        return object_pcd, scene_pcd
 
 
 class GraspPoseFinder:
@@ -347,6 +354,8 @@ class GraspPoseFinder:
             "third_party/GraspGen/models/checkpoints/graspgen_franka_panda.yml"
         )
         self.grasp_sampler = GraspGenSampler(self.grasp_cfg)
+        self.gripper_info = get_gripper_info(self.grasp_cfg.data.gripper_name)
+        self.gripper_collision_mesh = self.gripper_info.collision_mesh
         self.transform_matrix = None
 
     def set_transform_matrix(self, cam_extr_mat):
@@ -355,20 +364,31 @@ class GraspPoseFinder:
     def find(
         self,
         pcd: o3d.geometry.PointCloud,
+        pcd_colliding: o3d.geometry.PointCloud,
         focus_point: np.ndarray,
     ):
         points = np.array(pcd.points)
 
         # mask with focus point
-        point_mask = np.linalg.norm(points - focus_point, axis=1) < 0.2
-        pcd = pcd.select_by_index(np.where(point_mask)[0])
+        pcd = pcd.select_by_index(
+            np.where(np.linalg.norm(pcd.points - focus_point, axis=1) < 0.2)[0]
+        )
+        pcd_colliding = pcd_colliding.select_by_index(
+            np.where(np.linalg.norm(pcd_colliding.points - focus_point, axis=1) < 0.25)[
+                0
+            ]
+        )
+        # randomly filter out some points from pcd_colliding, and remain only 8192 points
+        pcd_colliding = pcd_colliding.select_by_index(
+            np.random.choice(len(pcd_colliding.points), 8192, replace=False)
+        )
 
         o3d.io.write_point_cloud("outputs/pcd_masked.ply", pcd)
         pcd_transformed = pcd.transform(self.transform_matrix)
         points_transformed = np.array(pcd_transformed.points)
         o3d.io.write_point_cloud("outputs/pcd_transformed.ply", pcd_transformed)
 
-        grasps_inferred, _ = GraspGenSampler.run_inference(
+        grasp_inferred, _ = GraspGenSampler.run_inference(
             points_transformed,
             self.grasp_sampler,
             grasp_threshold=0.8,
@@ -376,19 +396,22 @@ class GraspPoseFinder:
             topk_num_grasps=-1,
             remove_outliers=True,
         )
-        grasps_translations = grasps_inferred[:, :3, 3].detach().cpu().numpy()
-        grasps_rotation_matrices = grasps_inferred[:, :3, :3].detach().cpu().numpy()
+        grasp_inferred = (
+            np.linalg.inv(self.transform_matrix) @ grasp_inferred.detach().cpu().numpy()
+        )
+        log.info(f"Total grasp candidates: {grasp_inferred.shape[0]}")
 
-        grasps_translations = (
-            grasps_translations - self.transform_matrix[:3, 3]
-        ) @ self.transform_matrix[:3, :3]
-
-        grasps_rotation_matrices = (
-            self.transform_matrix[:3, :3].T @ grasps_rotation_matrices
+        collision_free_mask = filter_colliding_grasps(
+            scene_pc=np.asarray(pcd_colliding.points),
+            grasp_poses=grasp_inferred,
+            gripper_collision_mesh=self.gripper_collision_mesh,
+            collision_threshold=0.002,
         )
 
-        log.info(f"Total grasp candidates: {len(grasps_translations)}")
+        log.info(f"Collision-free grasp candidates: {np.sum(collision_free_mask)}")
 
+        grasps_translations = grasp_inferred[collision_free_mask, :3, 3]
+        grasps_rotation_matrices = grasp_inferred[collision_free_mask, :3, :3]
         return grasps_translations, grasps_rotation_matrices
 
     def visualize(
@@ -900,18 +923,23 @@ class TrajOptimizer:
             pcd_original += pcd
 
         pcd_segmented = o3d.geometry.PointCloud()
+        pcd_colliding = o3d.geometry.PointCloud()
         for pcd, img, intr, extr in zip(pcds, images, camera_intr_mat, camera_extr_mat):
-            pcd = self.sam2.segment_from_pcd(
+            pcd_object, pcd_scene = self.sam2.segment_from_pcd(
                 pcd,
                 img,
                 start_point_3d,
                 intr,
                 extr,
             )
-            pcd_segmented += pcd
+            pcd_segmented += pcd_object
+            pcd_colliding += pcd_scene
 
         log.debug(f"pcd_original: {len(pcd_original.points)}")
         log.debug(f"pcd_segmented: {len(pcd_segmented.points)}")
+        log.debug(f"pcd_colliding: {len(pcd_colliding.points)}")
+
+        # filter out colliding grasps
 
         # TODO: add debug flag for visualization
         # Draw image
@@ -935,7 +963,7 @@ class TrajOptimizer:
         # number of grasp candidates to check
         N = 128
         gg_translations, gg_rotation_matrices = self.grasp_finder.find(
-            pcd_segmented, start_point_3d
+            pcd_segmented, pcd_colliding, start_point_3d
         )
         gg_translations, gg_rotation_matrices = self._sorted_grasp_by_distance(
             start_point_3d, gg_translations, gg_rotation_matrices
