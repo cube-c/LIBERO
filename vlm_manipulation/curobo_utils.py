@@ -295,7 +295,7 @@ class SAM2:
 
         _, labels = cv2.connectedComponents(masks[1].astype(np.uint8) * 255)
         seed_label = labels[point_coords[1], point_coords[0]]
-        connected_mask = (labels == seed_label)
+        connected_mask = labels == seed_label
 
         connected_mask_render = connected_mask.astype(np.uint8) * 255
         connected_mask_render = Image.fromarray(connected_mask_render)
@@ -303,10 +303,11 @@ class SAM2:
 
         return connected_mask
 
-    def segment_from_pcd(self, 
+    def segment_from_pcd(
+        self,
         pcd: o3d.geometry.PointCloud,
         img: Image.Image,
-        focus_point: np.ndarray, # 3d
+        focus_point: np.ndarray,  # 3d
         camera_intr_mat: np.ndarray,
         camera_extr_mat: np.ndarray,
     ):
@@ -316,7 +317,7 @@ class SAM2:
             @ camera_extr_mat[:3, :]
             @ np.concatenate([points, np.ones((points.shape[0], 1))], axis=1).T
         ).T
-        
+
         focus_point_2d = (
             camera_intr_mat
             @ camera_extr_mat[:3, :]
@@ -338,6 +339,7 @@ class SAM2:
         )
         segmentation_mask = segmentation_mask[points_y, points_x]
         return pcd.select_by_index(np.where(segmentation_mask)[0])
+
 
 class GraspPoseFinder:
     def __init__(self):
@@ -372,6 +374,7 @@ class GraspPoseFinder:
             grasp_threshold=0.8,
             num_grasps=200,
             topk_num_grasps=-1,
+            remove_outliers=True,
         )
         grasps_translations = grasps_inferred[:, :3, 3].detach().cpu().numpy()
         grasps_rotation_matrices = grasps_inferred[:, :3, :3].detach().cpu().numpy()
@@ -931,7 +934,9 @@ class TrajOptimizer:
 
         # number of grasp candidates to check
         N = 128
-        gg_translations, gg_rotation_matrices = self.grasp_finder.find(pcd_segmented, start_point_3d)
+        gg_translations, gg_rotation_matrices = self.grasp_finder.find(
+            pcd_segmented, start_point_3d
+        )
         gg_translations, gg_rotation_matrices = self._sorted_grasp_by_distance(
             start_point_3d, gg_translations, gg_rotation_matrices
         )
