@@ -28,7 +28,7 @@ import rootutils
 from loguru import logger as log
 from rich.logging import RichHandler
 from scipy.spatial.transform import Rotation as R
-from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor, AutoModel
 
 from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
 from curobo.geom.types import Cuboid, Mesh, WorldConfig
@@ -56,49 +56,103 @@ from third_party.GraspGen.grasp_gen.robot import get_gripper_info
 class VLMPointExtractor:
     def __init__(self, ckpt_path="Qwen/Qwen2.5-VL-7B-Instruct"):
         self.ckpt_path = ckpt_path
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            ckpt_path, torch_dtype="auto", device_map="auto"
-        )
-        self.processor = AutoProcessor.from_pretrained(ckpt_path)
+
+        # Detect model type based on checkpoint path
+        self.is_nvila = "NVILA" in ckpt_path
+
+        if self.is_nvila:
+            # Load NVILA model
+            log.info(f"Loading NVILA model from {ckpt_path}")
+            self.model = AutoModel.from_pretrained(
+                ckpt_path,
+                torch_dtype="auto",
+                device_map="auto",
+                trust_remote_code=True
+            )
+            self.processor = AutoProcessor.from_pretrained(
+                ckpt_path,
+                trust_remote_code=True
+            )
+        else:
+            # Load Qwen2.5-VL model
+            log.info(f"Loading Qwen2.5-VL model from {ckpt_path}")
+            self.model = AutoModel.from_pretrained(
+                ckpt_path, torch_dtype="auto", device_map="auto"
+            )
+            self.processor = AutoProcessor.from_pretrained(ckpt_path)
+
+        self.model.eval()
 
     def inference(self, img, prompt):
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": img},
-                    {"type": "text", "text": prompt},
-                ],
-            },
-        ]
+        if self.is_nvila:
+            # NVILA inference path
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": img},
+                        {"type": "text", "text": prompt},
+                    ],
+                },
+            ]
 
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.processor(
-            text=text,
-            images=img,
-            return_tensors="pt",
-        )
-        inputs = inputs.to(self.model.device)
-        generated_ids = self.model.generate(**inputs, max_new_tokens=512)
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        output_text = self.processor.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )[0]
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            inputs = self.processor([text], images=[img])
+
+            generated_ids = self.model.generate(
+                input_ids=inputs.input_ids.to(self.model.device),
+                media=inputs.media.to(self.model.device) if hasattr(inputs, 'media') and inputs.media is not None else None,
+                media_config=inputs.media_config if hasattr(inputs, 'media_config') else None,
+                max_new_tokens=512,
+            )
+            output_text = self.processor.tokenizer.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+        else:
+            # Qwen2.5-VL inference path
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": img},
+                        {"type": "text", "text": prompt},
+                    ],
+                },
+            ]
+
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            inputs = self.processor(
+                text=text,
+                images=img,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.model.device)
+            generated_ids = self.model.generate(**inputs, max_new_tokens=512)
+            generated_ids_trimmed = [
+                out_ids[len(in_ids) :]
+                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            output_text = self.processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+
         return output_text
 
     def extract_points(self, img, object_name):
         prompt = f"{object_name}\nOutput its coordinates in XML format <points x y>object</points>."
         output_text = self.inference(img, prompt)
         point = self._extract_points_from_text(output_text, img.width, img.height)
-        log.info(f"Qwen2.5-VL point: {point}")
+        model_name = "NVILA" if self.is_nvila else "Qwen2.5-VL"
+        log.info(f"{model_name} point: {point}")
         return point
 
     def extract_sequence(self, img, prompt):
@@ -113,7 +167,8 @@ class VLMPointExtractor:
         """
         prompt = "Instruction: " + prompt + "\n" + prompt_suffix
         output_text = self.inference(img, prompt)
-        log.info(f"Qwen2.5-VL action sequence: {output_text}")
+        model_name = "NVILA" if self.is_nvila else "Qwen2.5-VL"
+        log.info(f"{model_name} action sequence: {output_text}")
         seq = self._extract_sequence(output_text)
         return seq
 
@@ -454,8 +509,8 @@ class TrajOptimizer:
         robot_config: Curobo robot config
     """
 
-    def __init__(self):
-        self.point_extractor = VLMPointExtractor()
+    def __init__(self, ckpt_path: Optional[str] = None):
+        self.point_extractor = VLMPointExtractor(ckpt_path=ckpt_path)
         self.grasp_finder = GraspPoseFinder()
         self.sam2 = SAM2()
 

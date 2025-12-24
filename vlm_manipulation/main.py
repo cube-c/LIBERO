@@ -235,7 +235,7 @@ class MotionController:
         bid = sim.model.body_name2id(robot.robot_model.root_body)
         robot_position = sim.data.body_xpos[bid].copy()
         robot_rotation_matrix = sim.data.body_xmat[bid].reshape(3, 3).copy()
-        
+
         pcds_transformed = []
         for pcd in pcds:
             pcd = pcd.translate(-robot_position)
