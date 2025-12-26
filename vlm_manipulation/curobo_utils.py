@@ -22,13 +22,17 @@ import json
 import re
 from typing import Any, List, Optional
 import time
+import base64
+import requests
+from io import BytesIO
 
 import open3d as o3d
 import rootutils
+
 from loguru import logger as log
 from rich.logging import RichHandler
 from scipy.spatial.transform import Rotation as R
-from transformers import AutoProcessor, AutoModel
+from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
 from curobo.geom.types import Cuboid, Mesh, WorldConfig
@@ -61,57 +65,68 @@ class VLMPointExtractor:
         self.is_nvila = "NVILA" in ckpt_path
 
         if self.is_nvila:
-            # Load NVILA model
-            log.info(f"Loading NVILA model from {ckpt_path}")
-            self.model = AutoModel.from_pretrained(
-                ckpt_path,
-                torch_dtype="auto",
-                device_map="auto",
-                trust_remote_code=True
-            )
-            self.processor = AutoProcessor.from_pretrained(
-                ckpt_path,
-                trust_remote_code=True
-            )
+            model_name = ckpt_path.split("/")[-1]
+            self.model_name = model_name
+            self.api_host = "localhost"
+            self.api_port = 8000
+            self.api_url = f"http://{self.api_host}:{self.api_port}/chat/completions"
+            log.info(f"Using NVILA API at {self.api_url} with model {self.model_name}")
         else:
             # Load Qwen2.5-VL model
             log.info(f"Loading Qwen2.5-VL model from {ckpt_path}")
-            self.model = AutoModel.from_pretrained(
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 ckpt_path, torch_dtype="auto", device_map="auto"
             )
             self.processor = AutoProcessor.from_pretrained(ckpt_path)
+            self.model.eval()
 
-        self.model.eval()
+    def _encode_image_to_base64(self, img):
+        """Encode PIL Image to base64 data URL."""
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        encoded = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{encoded}"
 
     def inference(self, img, prompt):
         if self.is_nvila:
-            # NVILA inference path
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": img},
-                        {"type": "text", "text": prompt},
-                    ],
-                },
-            ]
+            # NVILA inference path - API-based
+            image_data = self._encode_image_to_base64(img)
 
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-            inputs = self.processor([text], images=[img])
+            payload = {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image_data
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": prompt
+                            }
+                        ]
+                    }
+                ]
+            }
 
-            generated_ids = self.model.generate(
-                input_ids=inputs.input_ids.to(self.model.device),
-                media=inputs.media.to(self.model.device) if hasattr(inputs, 'media') and inputs.media is not None else None,
-                media_config=inputs.media_config if hasattr(inputs, 'media_config') else None,
-                max_new_tokens=512,
-            )
-            output_text = self.processor.tokenizer.batch_decode(
-                generated_ids,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )[0]
+            try:
+                response = requests.post(self.api_url, json=payload, timeout=180)
+                response.raise_for_status()
+                result = response.json()
+                print(result)
+
+                if "choices" in result and len(result["choices"]) > 0:
+                    output_text = result["choices"][0]["message"]["content"]
+                else:
+                    raise ValueError(f"Unexpected API response format: {result}")
+
+            except requests.exceptions.RequestException as e:
+                log.error(f"Error calling NVILA API: {e}")
+                raise
         else:
             # Qwen2.5-VL inference path
             messages = [

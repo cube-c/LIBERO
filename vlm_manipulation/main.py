@@ -349,7 +349,8 @@ def modify_sideview_camera(env):
 if __name__ == "__main__":
     benchmark_dict = benchmark.get_benchmark_dict()
     benchmark_instance = benchmark_dict[task_type]()
-    traj_optimizer = TrajOptimizer()
+    # traj_optimizer = TrajOptimizer("Qwen/Qwen2.5-VL-7B-Instruct")
+    traj_optimizer = TrajOptimizer("Efficient-Large-Model/NVILA-LITE-2B")
 
     for task_id in range(benchmark_instance.get_num_tasks()):
         task = benchmark_instance.get_task(task_id)

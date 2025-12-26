@@ -12,6 +12,7 @@ clip/
 gpt/
 bert/
 logs/
+core
 
 *.mp4
 libero.egg-info/
