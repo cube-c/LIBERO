@@ -58,19 +58,28 @@ from third_party.GraspGen.grasp_gen.robot import get_gripper_info
 
 
 class VLMPointExtractor:
-    def __init__(self, ckpt_path="Qwen/Qwen2.5-VL-7B-Instruct"):
+    def __init__(self, ckpt_path="Qwen/Qwen2.5-VL-7B-Instruct", api_host="localhost"):
         self.ckpt_path = ckpt_path
+        self.api_host = api_host
 
         # Detect model type based on checkpoint path
         self.is_nvila = "NVILA" in ckpt_path
+        self.is_molmo = "Molmo" in ckpt_path or "molmo" in ckpt_path
 
         if self.is_nvila:
-            model_name = ckpt_path.split("/")[-1]
+            # NVILA uses API-based inference on port 8000
+            model_name = ckpt_path.split("/")[-1].lower()
             self.model_name = model_name
-            self.api_host = "localhost"
             self.api_port = 8000
             self.api_url = f"http://{self.api_host}:{self.api_port}/chat/completions"
             log.info(f"Using NVILA API at {self.api_url} with model {self.model_name}")
+        elif self.is_molmo:
+            # Molmo uses API-based inference on port 8001
+            model_name = ckpt_path.split("/")[-1]
+            self.model_name = model_name
+            self.api_port = 8001
+            self.api_url = f"http://{self.api_host}:{self.api_port}/chat/completions"
+            log.info(f"Using Molmo API at {self.api_url} with model {self.model_name}")
         else:
             # Load Qwen2.5-VL model
             log.info(f"Loading Qwen2.5-VL model from {ckpt_path}")
@@ -88,8 +97,9 @@ class VLMPointExtractor:
         return f"data:image/png;base64,{encoded}"
 
     def inference(self, img, prompt):
-        if self.is_nvila:
-            # NVILA inference path - API-based
+        if self.is_nvila or self.is_molmo:
+            # API-based inference (NVILA or Molmo)
+            model_type = "NVILA" if self.is_nvila else "Molmo"
             image_data = self._encode_image_to_base64(img)
 
             payload = {
@@ -117,7 +127,6 @@ class VLMPointExtractor:
                 response = requests.post(self.api_url, json=payload, timeout=180)
                 response.raise_for_status()
                 result = response.json()
-                print(result)
 
                 if "choices" in result and len(result["choices"]) > 0:
                     output_text = result["choices"][0]["message"]["content"]
@@ -125,7 +134,7 @@ class VLMPointExtractor:
                     raise ValueError(f"Unexpected API response format: {result}")
 
             except requests.exceptions.RequestException as e:
-                log.error(f"Error calling NVILA API: {e}")
+                log.error(f"Error calling {model_type} API: {e}")
                 raise
         else:
             # Qwen2.5-VL inference path
@@ -162,14 +171,6 @@ class VLMPointExtractor:
 
         return output_text
 
-    def extract_points(self, img, object_name):
-        prompt = f"{object_name}\nOutput its coordinates in XML format <points x y>object</points>."
-        output_text = self.inference(img, prompt)
-        point = self._extract_points_from_text(output_text, img.width, img.height)
-        model_name = "NVILA" if self.is_nvila else "Qwen2.5-VL"
-        log.info(f"{model_name} point: {point}")
-        return point
-
     def extract_sequence(self, img, prompt):
         # example prompt from LIBERO
         prompt_suffix = """
@@ -177,17 +178,26 @@ class VLMPointExtractor:
             Report the point coordinates in JSON array like this: \
             [{"pick_up": [x, y], "place_down": [x, y]}, ...] \
             Use the object center for pick_up; use the intended contact point for place_down.
-            For the place_down with prepositions like “in/into/inside”, it must be \
+            For the place_down with prepositions like "in/into/inside", it must be \
             on interior surface of the container, NOT the rim, NOT the outer wall, NOT the exterior top.
         """
         prompt = "Instruction: " + prompt + "\n" + prompt_suffix
         output_text = self.inference(img, prompt)
-        model_name = "NVILA" if self.is_nvila else "Qwen2.5-VL"
+
+        # Determine model name for logging
+        if self.is_nvila:
+            model_name = "NVILA"
+        elif self.is_molmo:
+            model_name = "Molmo"
+        else:
+            model_name = "Qwen2.5-VL"
         log.info(f"{model_name} action sequence: {output_text}")
-        seq = self._extract_sequence(output_text)
+
+        # Extract sequence with image dimensions and model type
+        seq = self._extract_sequence(output_text, img.width, img.height, is_percent=self.is_molmo)
         return seq
 
-    def _extract_sequence(self, text):
+    def _extract_sequence(self, text, image_width=None, image_height=None, is_percent=False):
         def _is_pick_put_obj(obj: Any) -> bool:
             if not isinstance(obj, dict):
                 return False
@@ -203,8 +213,17 @@ class VLMPointExtractor:
 
             return ok(obj["pick_up"]) and ok(obj["place_down"])
 
-        def _normalize_pair(v):  # ints are usually what you want for pixels
+        def _normalize_pair(v):
+            """
+            Normalize coordinate pair to pixel coordinates.
+            If is_percent=True, converts from percent (0-100) to pixels.
+            Otherwise, just converts to int (already in pixels).
+            """
             x, y = v
+            if is_percent and image_width is not None and image_height is not None:
+                # Convert from percent (0-100) to pixel coordinates
+                x = (x / 100.0) * image_width
+                y = (y / 100.0) * image_height
             return [int(x), int(y)]
 
         def flatten(obj: Any):
@@ -287,65 +306,6 @@ class VLMPointExtractor:
                     seen.add(key)
                     results.append(item)
         return results
-
-    def _extract_points_from_text(self, text, image_w, image_h):
-        all_points = []
-        for match in re.finditer(r"Click\(([0-9]+\.[0-9]), ?([0-9]+\.[0-9])\)", text):
-            try:
-                point = [float(match.group(i)) for i in range(1, 3)]
-            except ValueError:
-                pass
-            else:
-                point = np.array(point)
-                if np.max(point) > 100:
-                    # Treat as an invalid output
-                    continue
-                point /= 100.0
-                point = point * np.array([image_w, image_h])
-                all_points.append(point)
-
-        for match in re.finditer(r"\(([0-9]+\.[0-9]),? ?([0-9]+\.[0-9])\)", text):
-            try:
-                point = [float(match.group(i)) for i in range(1, 3)]
-            except ValueError:
-                pass
-            else:
-                point = np.array(point)
-                if np.max(point) > 100:
-                    # Treat as an invalid output
-                    continue
-                point /= 100.0
-                point = point * np.array([image_w, image_h])
-                all_points.append(point)
-        for match in re.finditer(
-            r'x\d*="\s*([0-9]+(?:\.[0-9]+)?)"\s+y\d*="\s*([0-9]+(?:\.[0-9]+)?)"', text
-        ):
-            try:
-                point = [float(match.group(i)) for i in range(1, 3)]
-            except ValueError:
-                pass
-            else:
-                point = np.array(point)
-                # if np.max(point) > 100:
-                #     # Treat as an invalid output
-                #     continue
-                # point /= 100.0
-                # point = point * np.array([image_w, image_h])
-                all_points.append(point)
-        for match in re.finditer(r"(?:\d+|p)\s*=\s*([0-9]{3})\s*,\s*([0-9]{3})", text):
-            try:
-                point = [int(match.group(i)) / 10.0 for i in range(1, 3)]
-            except ValueError:
-                pass
-            else:
-                point = np.array(point)
-                if np.max(point) > 100:
-                    # Treat as an invalid output
-                    continue
-                point /= 100.0
-                point = point * np.array([image_w, image_h])
-                all_points.append(point)
-        return all_points
 
 
 class SAM2:
