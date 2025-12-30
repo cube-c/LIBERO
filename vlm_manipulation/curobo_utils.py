@@ -20,7 +20,7 @@ log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
 import json
 import re
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 import time
 import base64
 import requests
@@ -28,6 +28,7 @@ from io import BytesIO
 
 import open3d as o3d
 import rootutils
+import xml.etree.ElementTree as ET
 
 from loguru import logger as log
 from rich.logging import RichHandler
@@ -172,15 +173,27 @@ class VLMPointExtractor:
         return output_text
 
     def extract_sequence(self, img, prompt):
-        # example prompt from LIBERO
-        prompt_suffix = """
-            Plan the picking up and placing down actions with points. \
-            Report the point coordinates in JSON array like this: \
-            [{"pick_up": [x, y], "place_down": [x, y]}, ...] \
-            Use the object center for pick_up; use the intended contact point for place_down.
-            For the place_down with prepositions like "in/into/inside", it must be \
-            on interior surface of the container, NOT the rim, NOT the outer wall, NOT the exterior top.
-        """
+        if self.is_molmo:
+            prompt_suffix = """
+                Plan the picking up and placing down actions with points. \
+                Output a list of <point> tags. \
+                For one pick-and-place, output exactly these two points in this order: \
+                <point x=".." y=".." alt="pick_up_1">pick_up_1</point> <point x=".." y=".." alt="place_down_1">place_down_1</point> \
+                Only if multiple pick-and-place actions are truly necessary, append pick_up_2 then place_down_2, then pick_up_3 then place_down_3, ... \
+                Use the object center for pick_up; use the intended contact point for place_down. \
+                If the instruction implies placing in/into/inside a container, place_down must be on an interior surface (not rim, not exterior).
+            """
+
+        else:   
+            # example prompt from LIBERO
+            prompt_suffix = """
+                Plan the picking up and placing down actions with points. \
+                Report the point coordinates in JSON array like this: \
+                [{"pick_up": [x, y], "place_down": [x, y]}, ...] \
+                Use the object center for pick_up; use the intended contact point for place_down.
+                For the place_down with prepositions like "in/into/inside", it must be \
+                on interior surface of the container, NOT the rim, NOT the outer wall, NOT the exterior top.
+            """
         prompt = "Instruction: " + prompt + "\n" + prompt_suffix
         output_text = self.inference(img, prompt)
 
@@ -198,6 +211,101 @@ class VLMPointExtractor:
         return seq
 
     def _extract_sequence(self, text, image_width=None, image_height=None, is_percent=False):
+        def _normalize_pair(v):
+            """
+            Normalize coordinate pair to pixel coordinates.
+            If is_percent=True, converts from percent (0-100) to pixels.
+            Otherwise, just converts to int (already in pixels).
+            """
+            x, y = v
+            if is_percent and image_width is not None and image_height is not None:
+                # Convert from percent (0-100) to pixel coordinates
+                x = (x / 100.0) * image_width
+                y = (y / 100.0) * image_height
+            return [int(x), int(y)]
+
+        def _extract_molmo_xml(s: str) -> List[Dict[str, List[int]]]:
+            # 1) collect <point ...>...</point> (and <point .../> just in case)
+            point_frags = []
+            point_frags += re.findall(r"<point\b[^>]*/\s*>", s, flags=re.IGNORECASE | re.DOTALL)
+            point_frags += re.findall(r"<point\b[^>]*>.*?</point>", s, flags=re.IGNORECASE | re.DOTALL)
+
+            points = []  # list of (label, x, y)
+            for frag in point_frags:
+                try:
+                    el = ET.fromstring(frag)
+                except ET.ParseError:
+                    continue
+
+                x = el.attrib.get("x")
+                y = el.attrib.get("y")
+                if x is None or y is None:
+                    continue
+
+                # label preference: alt > inner text
+                label = (el.attrib.get("alt") or (el.text or "")).strip()
+                if not label:
+                    continue
+
+                try:
+                    fx, fy = float(x), float(y)
+                except ValueError:
+                    continue
+
+                points.append((label, fx, fy))
+
+            # 2) fallback: parse <points x1=.. y1=.. x2=.. y2=..>labels</points>
+            #    (Molmo에서 pick/place는 <point>가 더 안정적이지만, 혹시 섞여 나올 때 대비)
+            for m in re.finditer(r"<points\b([^>]*)>(.*?)</points>", s, flags=re.IGNORECASE | re.DOTALL):
+                attrs = m.group(1)
+                inner = (m.group(2) or "").strip()
+
+                xs = {int(i): float(v) for i, v in re.findall(r'x(\d+)="([^"]+)"', attrs)}
+                ys = {int(i): float(v) for i, v in re.findall(r'y(\d+)="([^"]+)"', attrs)}
+                ids = sorted(set(xs) & set(ys))
+                if not ids:
+                    continue
+
+                # optional labels in inner text, e.g. "pick_up_1; place_down_1"
+                labels = [t.strip() for t in inner.split(";") if t.strip()]
+                for idx_pos, pid in enumerate(ids):
+                    fx, fy = xs[pid], ys[pid]
+                    label = labels[idx_pos] if idx_pos < len(labels) else f"point_{pid}"
+                    points.append((label, fx, fy))
+
+            # 3) group into actions by suffix index: pick_up(_i) / place_down(_i)
+            actions: Dict[int, Dict[str, List[float]]] = {}
+            for label, x, y in points:
+                mm = re.match(r"^(pick_up|place_down)(?:_(\d+))?$", label)
+                if not mm:
+                    continue
+                role = mm.group(1)
+                idx = int(mm.group(2) or 1)
+                actions.setdefault(idx, {})[role] = [x, y]
+
+            # 4) build results (only complete pairs)
+            results = []
+            seen = set()
+            for idx in sorted(actions.keys()):
+                a = actions[idx]
+                if "pick_up" not in a or "place_down" not in a:
+                    continue
+                item = {
+                    "pick_up": _normalize_pair(a["pick_up"]),
+                    "place_down": _normalize_pair(a["place_down"]),
+                }
+                key = json.dumps(item, sort_keys=True)
+                if key not in seen:
+                    seen.add(key)
+                    results.append(item)
+            return results
+
+        # -------------------------
+        # choose parser
+        # -------------------------
+        if getattr(self, "is_molmo", False):
+            return _extract_molmo_xml(text)
+
         def _is_pick_put_obj(obj: Any) -> bool:
             if not isinstance(obj, dict):
                 return False
@@ -212,19 +320,6 @@ class VLMPointExtractor:
                 )
 
             return ok(obj["pick_up"]) and ok(obj["place_down"])
-
-        def _normalize_pair(v):
-            """
-            Normalize coordinate pair to pixel coordinates.
-            If is_percent=True, converts from percent (0-100) to pixels.
-            Otherwise, just converts to int (already in pixels).
-            """
-            x, y = v
-            if is_percent and image_width is not None and image_height is not None:
-                # Convert from percent (0-100) to pixel coordinates
-                x = (x / 100.0) * image_width
-                y = (y / 100.0) * image_height
-            return [int(x), int(y)]
 
         def flatten(obj: Any):
             out = []
