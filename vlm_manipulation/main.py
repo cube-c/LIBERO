@@ -281,6 +281,7 @@ class MotionController:
                 prompt,
                 cam_intr_mat,
                 cam_extr_mat,
+                task_type,
                 task_id,
                 eval_index,
             )

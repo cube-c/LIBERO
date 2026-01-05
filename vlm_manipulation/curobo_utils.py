@@ -174,6 +174,7 @@ class VLMPointExtractor:
 
     def extract_sequence(self, img, prompt):
         if self.is_molmo:
+            prompt_prefix = "point_qa: Instruction - "
             prompt_suffix = """
                 Plan the picking up and placing down actions with points. \
                 Output a list of <point> tags. \
@@ -186,6 +187,7 @@ class VLMPointExtractor:
 
         else:   
             # example prompt from LIBERO
+            prompt_prefix = "Instruction: "
             prompt_suffix = """
                 Plan the picking up and placing down actions with points. \
                 Report the point coordinates in JSON array like this: \
@@ -194,7 +196,7 @@ class VLMPointExtractor:
                 For the place_down with prepositions like "in/into/inside", it must be \
                 on interior surface of the container, NOT the rim, NOT the outer wall, NOT the exterior top.
             """
-        prompt = "Instruction: " + prompt + "\n" + prompt_suffix
+        prompt = prompt_prefix + prompt + "\n" + prompt_suffix
         output_text = self.inference(img, prompt)
 
         # Determine model name for logging
@@ -1016,6 +1018,7 @@ class TrajOptimizer:
         prompt,
         camera_intr_mat: list[np.ndarray],
         camera_extr_mat: list[np.ndarray],
+        task_type,
         task_id,
         eval_index,
     ):
@@ -1071,7 +1074,8 @@ class TrajOptimizer:
         draw = ImageDraw.Draw(images[0])
         draw.circle(start_point, 4, fill="red")
         draw.circle(end_point, 4, fill="blue")
-        images[0].save(f"outputs/image_{task_id}_{eval_index}.png")
+        # TODO : add task name on image
+        images[0].save(f"outputs/{task_type}_{task_id}_{eval_index}.png")
 
         pcd_original = self._filter_out_robot_from_pcd(pcd_original)
         end_time = time.time()
