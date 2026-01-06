@@ -1,4 +1,5 @@
 import os
+import argparse
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 import open3d as o3d
@@ -25,8 +26,6 @@ log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
 H, W = 1024, 1024
 camera_names = ["agentview", "robot0_eye_in_hand"]
-
-task_type = "libero_object"
 
 
 def depth_buffer_to_depth_image(depth, zfar, znear):
@@ -309,6 +308,33 @@ class MotionController:
 
         return self.obs, self.done
 
+    def extract_points_only(self, prompt: str, task_type, task_id, eval_index):
+        """Extract and visualize points from the prompt without trajectory planning."""
+        start_time = time.time()
+
+        # Get images from observation
+        self.initial_act(20)
+        images = []
+        for camera_name in camera_names:
+            images.append(Image.fromarray(self.obs[camera_name + "_image"][::-1]))
+
+        # Call point-only extraction
+        try:
+            self.traj_optimizer.plan_point_only(
+                images,
+                prompt,
+                task_type,
+                task_id,
+                eval_index,
+            )
+        except Exception as e:
+            log.error(f"[PointOnly] Error during point extraction: {e}")
+            log.error(f"[PointOnly] Failed for task {task_id}, eval {eval_index}")
+            return
+
+        end_time = time.time()
+        log.info(f"[PointOnly] Total extraction time: {end_time - start_time}")
+
     def make_video(self, task_id=None, eval_index=None):
         # make video
         video_writer = imageio.get_writer(
@@ -348,6 +374,23 @@ def modify_sideview_camera(env):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="VLM Manipulation with LIBERO")
+    parser.add_argument(
+        "--task_type",
+        type=str,
+        default="libero_object",
+        help="Task type for LIBERO benchmark (e.g., libero_object, libero_spatial, libero_goal)"
+    )
+    parser.add_argument(
+        "--point_only",
+        action="store_true",
+        help="Extract and visualize points only without trajectory planning"
+    )
+    args = parser.parse_args()
+
+    task_type = args.task_type
+    point_only = args.point_only
+
     benchmark_dict = benchmark.get_benchmark_dict()
     benchmark_instance = benchmark_dict[task_type]()
     # traj_optimizer = TrajOptimizer("Qwen/Qwen2.5-VL-7B-Instruct")
@@ -377,8 +420,9 @@ if __name__ == "__main__":
         print(f"Task Name: {task.name}")
         print(f"Task Description: {task.language}")
 
-        success = 0
-        total = 0
+        if not point_only:
+            success = 0
+            total = 0
 
         for eval_index in range(min(len(init_states), 10)):
             #     Fix random seeds for reproducibility
@@ -394,15 +438,22 @@ if __name__ == "__main__":
             modify_sideview_camera(env)
 
             mc = MotionController(env, obs, traj_optimizer)
-            obs, done = mc.simulate_from_prompt(task.language)
-            mc.make_video(task_id, eval_index)
-            if done:
-                success += 1
-            total += 1
-            log.info(f"Success Rate for Task {task_id}: {success} / {total}")
 
-        # log to external file
-        with open("outputs/success_rate.txt", "a") as f:
-            f.write(f"{task_type} {task_id}: {success} / {total}\n")
+            if point_only:
+                # Point-only mode: extract and visualize points without trajectory planning
+                mc.extract_points_only(task.language, task_type, task_id, eval_index)
+            else:
+                # Normal mode: full trajectory planning and execution
+                obs, done = mc.simulate_from_prompt(task.language)
+                mc.make_video(task_id, eval_index)
+                if done:
+                    success += 1
+                total += 1
+                log.info(f"Success Rate for Task {task_id}: {success} / {total}")
+
+        # log to external file (only in normal mode)
+        if not point_only:
+            with open("outputs/success_rate.txt", "a") as f:
+                f.write(f"{task_type} {task_id}: {success} / {total}\n")
 
         env.close()

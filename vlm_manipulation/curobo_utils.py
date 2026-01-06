@@ -6,6 +6,7 @@ from __future__ import annotations
 
 
 import copy
+import os
 
 import numpy as np
 import rootutils
@@ -171,6 +172,138 @@ class VLMPointExtractor:
             )[0]
 
         return output_text
+
+    def extract_point_prediction(self, img, prompt):
+        """
+        TODO: implement this for Molmo. Please left there cases as NotImplementedError.
+        prompt(instruction) comes as follows, parse this {obj_pick_up} and {obj_place_down} with regex. If parsing is failed, raise ValueError.:
+            "pick up {obj_pick_up} and place it on {obj_place_down}."
+        There will be two point prediction questions.
+        Questions are coming as follows: (two questions separately)
+            "point_qa: Where is {obj_pick_up}?"
+            "point_qa: Where is {obj_place_down}?"
+        Returns:
+            Dictionary of x, y coordinates, in pixel space:
+            {
+                "pick_up": [x1, y1],
+                "place_down": [x2, y2]
+            }
+        """
+        if not self.is_molmo:
+            raise NotImplementedError("extract_point_prediction is only implemented for Molmo")
+
+        # Parse the prompt to extract object names
+        # Pattern matches: "pick up {obj} and place it on {obj}"
+        pattern = (
+            r"\bpick up\s+(?P<pick_up>.+?)\s+and\s+place it\s+"
+            r"(?:on|in|into|inside)\s+(?P<place_down>.+?)"
+            r"(?:\s*\.\s*|$)"
+        )
+        match = re.search(pattern, prompt, re.IGNORECASE)
+
+        if not match:
+            raise ValueError(f"Failed to parse prompt: {prompt}. Expected format: 'pick up {{obj_pick_up}} and place it on {{obj_place_down}}.'")
+
+        obj_pick_up = match.group("pick_up").strip()
+        obj_place_down = match.group("place_down").strip()
+
+        log.info(f"Extracted objects - pick_up: '{obj_pick_up}', place_down: '{obj_place_down}'")
+
+        # Query for pick_up object location
+        pick_up_question = f"point_qa: Point to {obj_pick_up}. Output coordinates with a <Point/> HTML tag."
+        pick_up_response = self.inference(img, pick_up_question)
+        log.info(f"Pick-up question: {pick_up_question}")
+        log.info(f"Pick-up response: {pick_up_response}")
+
+        # Query for place_down object location
+        place_down_question = f"point_qa: Point to {obj_place_down}. Output coordinates with a <Point/> HTML tag."
+        place_down_response = self.inference(img, place_down_question)
+        log.info(f"Place-down question: {place_down_question}")
+        log.info(f"Place-down response: {place_down_response}")
+
+        # Parse the responses to extract x, y coordinates
+        pick_up_coords = self._extract_point_from_molmo_response(pick_up_response, img.width, img.height)
+        place_down_coords = self._extract_point_from_molmo_response(place_down_response, img.width, img.height)
+
+        return {
+            "pick_up": pick_up_coords,
+            "place_down": place_down_coords
+        }
+
+    def _extract_point_from_molmo_response(self, response_text, image_width, image_height):
+        """
+        Extract a single point from Molmo's response.
+        Supports both XML format (<point x="..." y="..."/>) and tuple format (x, y).
+        - XML format: coordinates in percent (0-100)
+        - Tuple format: coordinates normalized (0-1)
+
+        Args:
+            response_text: The response from Molmo
+            image_width: Width of the image in pixels
+            image_height: Height of the image in pixels
+
+        Returns:
+            [x, y] coordinates in pixel space
+        """
+        # Try to find <point> tags in the response (XML format)
+        point_pattern = r"<point\b[^>]*>"
+        point_matches = re.findall(point_pattern, response_text, flags=re.IGNORECASE)
+
+        if not point_matches:
+            # Try to find self-closing tags
+            point_pattern = r"<point\b[^>]*/\s*>"
+            point_matches = re.findall(point_pattern, response_text, flags=re.IGNORECASE)
+
+        if point_matches:
+            # Parse XML format (coordinates in 0-100 range)
+            point_tag = point_matches[0]
+
+            try:
+                # Try to parse as XML
+                # Add closing tag if not self-closing
+                if not point_tag.endswith("/>"):
+                    point_tag = point_tag + "</point>"
+                el = ET.fromstring(point_tag)
+            except ET.ParseError:
+                # Fallback: use regex to extract x and y attributes
+                x_match = re.search(r'x=["\']?([0-9.]+)["\']?', point_tag)
+                y_match = re.search(r'y=["\']?([0-9.]+)["\']?', point_tag)
+
+                if not x_match or not y_match:
+                    raise ValueError(f"Failed to parse point coordinates from: {point_tag}")
+
+                x_percent = float(x_match.group(1))
+                y_percent = float(y_match.group(1))
+            else:
+                # Successfully parsed as XML
+                x_str = el.attrib.get("x")
+                y_str = el.attrib.get("y")
+
+                if x_str is None or y_str is None:
+                    raise ValueError(f"Point tag missing x or y attribute: {point_tag}")
+
+                x_percent = float(x_str)
+                y_percent = float(y_str)
+
+            # Convert from percent (0-100) to pixel coordinates
+            x_pixel = int((x_percent / 100.0) * image_width)
+            y_pixel = int((y_percent / 100.0) * image_height)
+        else:
+            # Try to parse tuple format: (x, y) - coordinates in 0-1 range
+            tuple_pattern = r'\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)'
+            tuple_match = re.search(tuple_pattern, response_text)
+
+            if not tuple_match:
+                raise ValueError(f"No point found in Molmo response (tried XML and tuple formats): {response_text}")
+
+            x_normalized = float(tuple_match.group(1))
+            y_normalized = float(tuple_match.group(2))
+
+            # Convert from normalized (0-1) to pixel coordinates
+            x_pixel = int(x_normalized * image_width)
+            y_pixel = int(y_normalized * image_height)
+
+        return [x_pixel, y_pixel]
 
     def extract_sequence(self, img, prompt):
         if self.is_molmo:
@@ -1008,6 +1141,59 @@ class TrajOptimizer:
             self.robot_gripper_open_q if open_gripper else self.robot_gripper_close_q
         )
         return joint_pos
+
+    def plan_point_only(
+        self,
+        images: list[Image.Image],
+        prompt,
+        task_type,
+        task_id,
+        eval_index,
+    ):
+        """
+        Extract points from the prompt and save an annotated image.
+        This method extracts pick-up and place-down points without planning a trajectory.
+
+        Args:
+            images: List of PIL Images (uses first image)
+            prompt: Task instruction string
+            task_type: Type of task for filename
+            task_id: Task ID for filename
+            eval_index: Evaluation index for filename
+        """
+        start_time = time.time()
+
+        # Extract point predictions from the image and prompt
+        points = self.point_extractor.extract_point_prediction(images[0], prompt)
+
+        end_time = time.time()
+        log.info(f"[PointOnly] Time taken to extract points: {end_time - start_time}")
+
+        # Create a copy of the image to draw on
+        img_annotated = images[0].copy()
+        draw = ImageDraw.Draw(img_annotated)
+
+        # Extract pick_up and place_down points
+        pick_point = points["pick_up"]
+        place_point = points["place_down"]
+
+        # Draw pick-up point (red circle)
+        draw.circle(pick_point, 4, fill="red")
+
+        # Draw place-down point (blue circle)
+        draw.circle(place_point, 4, fill="blue")
+
+        log.info(f"Pick-up point at {pick_point}, place-down point at {place_point}")
+
+        # Save the annotated image in a dedicated subfolder
+        output_dir = "outputs/point_only"
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = f"{output_dir}/{task_type}_{task_id}_{eval_index}_points.png"
+        img_annotated.save(output_path)
+        log.info(f"[PointOnly] Saved annotated image to {output_path}")
+
+        end_time = time.time()
+        log.info(f"[PointOnly] Total time taken: {end_time - start_time}")
 
     def plan_trajectory(
         self,
