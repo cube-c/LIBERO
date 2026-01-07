@@ -335,6 +335,33 @@ class MotionController:
         end_time = time.time()
         log.info(f"[PointOnly] Total extraction time: {end_time - start_time}")
 
+    def extract_sequence_only(self, prompt: str, task_type, task_id, eval_index):
+        """Extract and visualize sequence points from the prompt without trajectory planning."""
+        start_time = time.time()
+
+        # Get images from observation
+        self.initial_act(20)
+        images = []
+        for camera_name in camera_names:
+            images.append(Image.fromarray(self.obs[camera_name + "_image"][::-1]))
+
+        # Call multipoint extraction
+        try:
+            self.traj_optimizer.plan_multipoint(
+                images,
+                prompt,
+                task_type,
+                task_id,
+                eval_index,
+            )
+        except Exception as e:
+            log.error(f"[SeqOnly] Error during sequence extraction: {e}")
+            log.error(f"[SeqOnly] Failed for task {task_id}, eval {eval_index}")
+            return
+
+        end_time = time.time()
+        log.info(f"[SeqOnly] Total extraction time: {end_time - start_time}")
+
     def make_video(self, task_id=None, eval_index=None):
         # make video
         video_writer = imageio.get_writer(
@@ -384,12 +411,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--point_only",
         action="store_true",
-        help="Extract and visualize points only without trajectory planning"
+        help="Extract and visualize points only without trajectory planning (uses extract_point_prediction)"
+    )
+    parser.add_argument(
+        "--seq_only",
+        action="store_true",
+        help="Extract and visualize sequence points without trajectory planning (uses extract_sequence)"
     )
     args = parser.parse_args()
 
     task_type = args.task_type
     point_only = args.point_only
+    seq_only = args.seq_only
+
+    # Check for mutually exclusive options
+    if point_only and seq_only:
+        parser.error("--point_only and --seq_only are mutually exclusive")
 
     benchmark_dict = benchmark.get_benchmark_dict()
     benchmark_instance = benchmark_dict[task_type]()
@@ -420,7 +457,7 @@ if __name__ == "__main__":
         print(f"Task Name: {task.name}")
         print(f"Task Description: {task.language}")
 
-        if not point_only:
+        if not point_only and not seq_only:
             success = 0
             total = 0
 
@@ -442,6 +479,9 @@ if __name__ == "__main__":
             if point_only:
                 # Point-only mode: extract and visualize points without trajectory planning
                 mc.extract_points_only(task.language, task_type, task_id, eval_index)
+            elif seq_only:
+                # Sequence-only mode: extract and visualize sequence points without trajectory planning
+                mc.extract_sequence_only(task.language, task_type, task_id, eval_index)
             else:
                 # Normal mode: full trajectory planning and execution
                 obs, done = mc.simulate_from_prompt(task.language)
@@ -452,7 +492,7 @@ if __name__ == "__main__":
                 log.info(f"Success Rate for Task {task_id}: {success} / {total}")
 
         # log to external file (only in normal mode)
-        if not point_only:
+        if not point_only and not seq_only:
             with open("outputs/success_rate.txt", "a") as f:
                 f.write(f"{task_type} {task_id}: {success} / {total}\n")
 

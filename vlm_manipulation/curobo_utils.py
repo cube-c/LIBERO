@@ -210,13 +210,13 @@ class VLMPointExtractor:
         log.info(f"Extracted objects - pick_up: '{obj_pick_up}', place_down: '{obj_place_down}'")
 
         # Query for pick_up object location
-        pick_up_question = f"point_qa: Point to {obj_pick_up}. Output coordinates with a <Point/> HTML tag."
+        pick_up_question = f"{prompt}. What is the pick-up point on the object to grasp?"
         pick_up_response = self.inference(img, pick_up_question)
         log.info(f"Pick-up question: {pick_up_question}")
         log.info(f"Pick-up response: {pick_up_response}")
 
         # Query for place_down object location
-        place_down_question = f"point_qa: Point to {obj_place_down}. Output coordinates with a <Point/> HTML tag."
+        place_down_question = f"{prompt}. What is the destination point on the target surface where the object should be placed?"
         place_down_response = self.inference(img, place_down_question)
         log.info(f"Place-down question: {place_down_question}")
         log.info(f"Place-down response: {place_down_response}")
@@ -230,9 +230,9 @@ class VLMPointExtractor:
             "place_down": place_down_coords
         }
 
-    def _extract_point_from_molmo_response(self, response_text, image_width, image_height):
+    def _extract_point_from_molmo_response(self, response_text, image_width, image_height, extract_all=False):
         """
-        Extract a single point from Molmo's response.
+        Extract point(s) from Molmo's response.
         Supports both XML format (<point x="..." y="..."/>) and tuple format (x, y).
         - XML format: coordinates in percent (0-100)
         - Tuple format: coordinates normalized (0-1)
@@ -241,10 +241,14 @@ class VLMPointExtractor:
             response_text: The response from Molmo
             image_width: Width of the image in pixels
             image_height: Height of the image in pixels
+            extract_all: If True, return all points found. If False, return only the first point.
 
         Returns:
-            [x, y] coordinates in pixel space
+            If extract_all=False: [x, y] coordinates in pixel space (single point)
+            If extract_all=True: [[x1, y1], [x2, y2], ...] list of coordinates (multiple points)
         """
+        all_points = []
+
         # Try to find <point> tags in the response (XML format)
         point_pattern = r"<point\b[^>]*>"
         point_matches = re.findall(point_pattern, response_text, flags=re.IGNORECASE)
@@ -256,66 +260,79 @@ class VLMPointExtractor:
 
         if point_matches:
             # Parse XML format (coordinates in 0-100 range)
-            point_tag = point_matches[0]
+            for point_tag in point_matches:
+                try:
+                    # Try to parse as XML
+                    # Add closing tag if not self-closing
+                    if not point_tag.endswith("/>"):
+                        point_tag_xml = point_tag + "</point>"
+                    else:
+                        point_tag_xml = point_tag
+                    el = ET.fromstring(point_tag_xml)
+                except ET.ParseError:
+                    # Fallback: use regex to extract x and y attributes
+                    x_match = re.search(r'x=["\']?([0-9.]+)["\']?', point_tag)
+                    y_match = re.search(r'y=["\']?([0-9.]+)["\']?', point_tag)
 
-            try:
-                # Try to parse as XML
-                # Add closing tag if not self-closing
-                if not point_tag.endswith("/>"):
-                    point_tag = point_tag + "</point>"
-                el = ET.fromstring(point_tag)
-            except ET.ParseError:
-                # Fallback: use regex to extract x and y attributes
-                x_match = re.search(r'x=["\']?([0-9.]+)["\']?', point_tag)
-                y_match = re.search(r'y=["\']?([0-9.]+)["\']?', point_tag)
+                    if not x_match or not y_match:
+                        continue  # Skip this point if we can't parse it
 
-                if not x_match or not y_match:
-                    raise ValueError(f"Failed to parse point coordinates from: {point_tag}")
+                    x_percent = float(x_match.group(1))
+                    y_percent = float(y_match.group(1))
+                else:
+                    # Successfully parsed as XML
+                    x_str = el.attrib.get("x")
+                    y_str = el.attrib.get("y")
 
-                x_percent = float(x_match.group(1))
-                y_percent = float(y_match.group(1))
-            else:
-                # Successfully parsed as XML
-                x_str = el.attrib.get("x")
-                y_str = el.attrib.get("y")
+                    if x_str is None or y_str is None:
+                        continue  # Skip this point if missing attributes
 
-                if x_str is None or y_str is None:
-                    raise ValueError(f"Point tag missing x or y attribute: {point_tag}")
+                    x_percent = float(x_str)
+                    y_percent = float(y_str)
 
-                x_percent = float(x_str)
-                y_percent = float(y_str)
+                # Convert from percent (0-100) to pixel coordinates
+                x_pixel = int((x_percent / 100.0) * image_width)
+                y_pixel = int((y_percent / 100.0) * image_height)
+                all_points.append([x_pixel, y_pixel])
 
-            # Convert from percent (0-100) to pixel coordinates
-            x_pixel = int((x_percent / 100.0) * image_width)
-            y_pixel = int((y_percent / 100.0) * image_height)
         else:
             # Try to parse tuple format: (x, y) - coordinates in 0-1 range
             tuple_pattern = r'\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)'
-            tuple_match = re.search(tuple_pattern, response_text)
+            tuple_matches = re.findall(tuple_pattern, response_text)
 
-            if not tuple_match:
-                raise ValueError(f"No point found in Molmo response (tried XML and tuple formats): {response_text}")
+            if not tuple_matches:
+                if not extract_all:
+                    raise ValueError(f"No point found in Molmo response (tried XML and tuple formats): {response_text}")
+                else:
+                    return []  # Return empty list if no points found
 
-            x_normalized = float(tuple_match.group(1))
-            y_normalized = float(tuple_match.group(2))
+            for tuple_match in tuple_matches:
+                x_normalized = float(tuple_match[0])
+                y_normalized = float(tuple_match[1])
 
-            # Convert from normalized (0-1) to pixel coordinates
-            x_pixel = int(x_normalized * image_width)
-            y_pixel = int(y_normalized * image_height)
+                # Convert from normalized (0-1) to pixel coordinates
+                x_pixel = int(x_normalized * image_width)
+                y_pixel = int(y_normalized * image_height)
+                all_points.append([x_pixel, y_pixel])
 
-        return [x_pixel, y_pixel]
+        if not all_points:
+            if extract_all:
+                return []
+            else:
+                raise ValueError(f"No point found in Molmo response: {response_text}")
+
+        # Return all points or just the first one
+        if extract_all:
+            return all_points
+        else:
+            return all_points[0]
 
     def extract_sequence(self, img, prompt):
         if self.is_molmo:
-            prompt_prefix = "point_qa: Instruction - "
+            prompt_prefix = "point_qa: "
             prompt_suffix = """
-                Plan the picking up and placing down actions with points. \
-                Output a list of <point> tags. \
-                For one pick-and-place, output exactly these two points in this order: \
-                <point x=".." y=".." alt="pick_up_1">pick_up_1</point> <point x=".." y=".." alt="place_down_1">place_down_1</point> \
-                Only if multiple pick-and-place actions are truly necessary, append pick_up_2 then place_down_2, then pick_up_3 then place_down_3, ... \
-                Use the object center for pick_up; use the intended contact point for place_down. \
-                If the instruction implies placing in/into/inside a container, place_down must be on an interior surface (not rim, not exterior).
+                Where is the pick-up and the place-down point?  \
+                Output the coordinates of two different points as a list of tuples, i.e. [(x1, y1), (x2, y2)].
             """
 
         else:   
@@ -359,87 +376,26 @@ class VLMPointExtractor:
                 y = (y / 100.0) * image_height
             return [int(x), int(y)]
 
-        def _extract_molmo_xml(s: str) -> List[Dict[str, List[int]]]:
-            # 1) collect <point ...>...</point> (and <point .../> just in case)
-            point_frags = []
-            point_frags += re.findall(r"<point\b[^>]*/\s*>", s, flags=re.IGNORECASE | re.DOTALL)
-            point_frags += re.findall(r"<point\b[^>]*>.*?</point>", s, flags=re.IGNORECASE | re.DOTALL)
-
-            points = []  # list of (label, x, y)
-            for frag in point_frags:
-                try:
-                    el = ET.fromstring(frag)
-                except ET.ParseError:
-                    continue
-
-                x = el.attrib.get("x")
-                y = el.attrib.get("y")
-                if x is None or y is None:
-                    continue
-
-                # label preference: alt > inner text
-                label = (el.attrib.get("alt") or (el.text or "")).strip()
-                if not label:
-                    continue
-
-                try:
-                    fx, fy = float(x), float(y)
-                except ValueError:
-                    continue
-
-                points.append((label, fx, fy))
-
-            # 2) fallback: parse <points x1=.. y1=.. x2=.. y2=..>labels</points>
-            #    (Molmo에서 pick/place는 <point>가 더 안정적이지만, 혹시 섞여 나올 때 대비)
-            for m in re.finditer(r"<points\b([^>]*)>(.*?)</points>", s, flags=re.IGNORECASE | re.DOTALL):
-                attrs = m.group(1)
-                inner = (m.group(2) or "").strip()
-
-                xs = {int(i): float(v) for i, v in re.findall(r'x(\d+)="([^"]+)"', attrs)}
-                ys = {int(i): float(v) for i, v in re.findall(r'y(\d+)="([^"]+)"', attrs)}
-                ids = sorted(set(xs) & set(ys))
-                if not ids:
-                    continue
-
-                # optional labels in inner text, e.g. "pick_up_1; place_down_1"
-                labels = [t.strip() for t in inner.split(";") if t.strip()]
-                for idx_pos, pid in enumerate(ids):
-                    fx, fy = xs[pid], ys[pid]
-                    label = labels[idx_pos] if idx_pos < len(labels) else f"point_{pid}"
-                    points.append((label, fx, fy))
-
-            # 3) group into actions by suffix index: pick_up(_i) / place_down(_i)
-            actions: Dict[int, Dict[str, List[float]]] = {}
-            for label, x, y in points:
-                mm = re.match(r"^(pick_up|place_down)(?:_(\d+))?$", label)
-                if not mm:
-                    continue
-                role = mm.group(1)
-                idx = int(mm.group(2) or 1)
-                actions.setdefault(idx, {})[role] = [x, y]
-
-            # 4) build results (only complete pairs)
-            results = []
-            seen = set()
-            for idx in sorted(actions.keys()):
-                a = actions[idx]
-                if "pick_up" not in a or "place_down" not in a:
-                    continue
-                item = {
-                    "pick_up": _normalize_pair(a["pick_up"]),
-                    "place_down": _normalize_pair(a["place_down"]),
-                }
-                key = json.dumps(item, sort_keys=True)
-                if key not in seen:
-                    seen.add(key)
-                    results.append(item)
-            return results
-
         # -------------------------
         # choose parser
         # -------------------------
         if getattr(self, "is_molmo", False):
-            return _extract_molmo_xml(text)
+            # Use the improved point extraction method for Molmo
+            try:
+                all_coords = self._extract_point_from_molmo_response(
+                    text, image_width, image_height, extract_all=True
+                )
+            except ValueError:
+                return []
+
+            # Pair up coordinates: [pick_up_1, place_down_1, pick_up_2, place_down_2, ...]
+            results = []
+            for i in range(0, len(all_coords) - 1, 2):
+                results.append({
+                    "pick_up": all_coords[i],
+                    "place_down": all_coords[i + 1],
+                })
+            return results
 
         def _is_pick_put_obj(obj: Any) -> bool:
             if not isinstance(obj, dict):
@@ -1194,6 +1150,65 @@ class TrajOptimizer:
 
         end_time = time.time()
         log.info(f"[PointOnly] Total time taken: {end_time - start_time}")
+
+    def plan_multipoint(
+        self,
+        images: list[Image.Image],
+        prompt,
+        task_type,
+        task_id,
+        eval_index,
+    ):
+        """
+        Extract multiple points from the prompt and save an annotated image.
+        This method uses extract_sequence to parse pick-up and place-down points.
+
+        Args:
+            images: List of PIL Images (uses first image)
+            prompt: Task instruction string
+            task_type: Type of task for filename
+            task_id: Task ID for filename
+            eval_index: Evaluation index for filename
+        """
+        start_time = time.time()
+
+        # Extract sequence from the image and prompt
+        seq = self.point_extractor.extract_sequence(images[0], prompt)
+
+        end_time = time.time()
+        log.info(f"[Multipoint] Time taken to extract sequence: {end_time - start_time}")
+
+        if not isinstance(seq, list) or len(seq) == 0:
+            log.error("[Multipoint] No valid action sequence found")
+            return
+
+        # Create a copy of the image to draw on
+        img_annotated = images[0].copy()
+        draw = ImageDraw.Draw(img_annotated)
+
+        # Draw all pick-up and place-down points from the sequence
+        for idx, action in enumerate(seq):
+            pick_point = action["pick_up"]
+            place_point = action["place_down"]
+
+            # Draw pick-up point (red circle)
+            draw.circle(pick_point, 4, fill="red")
+
+            # Draw place-down point (blue circle)
+            draw.circle(place_point, 4, fill="blue")
+
+            log.info(f"Action {idx + 1}: pick_up at {pick_point}, place_down at {place_point}")
+
+        # Save the annotated image in a dedicated subfolder
+        output_dir = "outputs/multipoint"
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = f"{output_dir}/{task_type}_{task_id}_{eval_index}_points.png"
+        img_annotated.save(output_path)
+        log.info(f"[Multipoint] Saved annotated image to {output_path}")
+
+        end_time = time.time()
+        log.info(f"[Multipoint] Total time taken: {end_time - start_time}")
+
 
     def plan_trajectory(
         self,
